@@ -1,0 +1,232 @@
+"""Unit tests for S3 to MongoDB operators."""
+
+import pytest
+from unittest.mock import Mock, MagicMock
+import sys
+import os
+
+# Skip all tests if Airflow is not installed
+airflow_available = False
+try:
+    import airflow
+    airflow_available = True
+except ImportError:
+    pass
+
+pytestmark = pytest.mark.skipif(not airflow_available, reason="Airflow is not installed")
+
+if airflow_available:
+    # Add airflow plugins to path
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../plugins"))
+
+    from operators.s3_to_mongo_operators import (
+        PrepareS3ToMongoTask,
+        ValidateS3ToMongoTask,
+        ExecuteS3ToMongoTask,
+        CleanUpS3ToMongoTask,
+    )
+
+
+class TestPrepareS3ToMongoTask:
+    """Test PrepareS3ToMongoTask operator."""
+
+    def test_execute_success(self):
+        """Test successful execution of prepare task."""
+        operator = PrepareS3ToMongoTask(task_id="prepare")
+
+        # Mock context
+        mock_dag_run = Mock()
+        mock_dag_run.conf = {
+            "integration_id": 1,
+            "s3_bucket": "test-bucket",
+            "s3_prefix": "data/",
+            "mongo_collection": "test_collection",
+        }
+        context = {"dag_run": mock_dag_run}
+
+        result = operator.execute(context)
+
+        assert result["s3_bucket"] == "test-bucket"
+        assert result["s3_prefix"] == "data/"
+        assert result["mongo_collection"] == "test_collection"
+        assert result["integration_id"] == 1
+
+    def test_execute_missing_s3_bucket(self):
+        """Test execution fails when s3_bucket is missing."""
+        operator = PrepareS3ToMongoTask(task_id="prepare")
+
+        mock_dag_run = Mock()
+        mock_dag_run.conf = {
+            "mongo_collection": "test_collection",
+        }
+        context = {"dag_run": mock_dag_run}
+
+        with pytest.raises(ValueError) as exc_info:
+            operator.execute(context)
+
+        assert "s3_bucket is required" in str(exc_info.value)
+
+    def test_execute_missing_mongo_collection(self):
+        """Test execution fails when mongo_collection is missing."""
+        operator = PrepareS3ToMongoTask(task_id="prepare")
+
+        mock_dag_run = Mock()
+        mock_dag_run.conf = {
+            "s3_bucket": "test-bucket",
+        }
+        context = {"dag_run": mock_dag_run}
+
+        with pytest.raises(ValueError) as exc_info:
+            operator.execute(context)
+
+        assert "mongo_collection is required" in str(exc_info.value)
+
+    def test_execute_with_default_prefix(self):
+        """Test execution with default s3_prefix."""
+        operator = PrepareS3ToMongoTask(task_id="prepare")
+
+        mock_dag_run = Mock()
+        mock_dag_run.conf = {
+            "s3_bucket": "test-bucket",
+            "mongo_collection": "test_collection",
+        }
+        context = {"dag_run": mock_dag_run}
+
+        result = operator.execute(context)
+
+        assert result["s3_prefix"] == ""
+
+    def test_execute_with_empty_conf(self):
+        """Test execution with None conf."""
+        operator = PrepareS3ToMongoTask(task_id="prepare")
+
+        mock_dag_run = Mock()
+        mock_dag_run.conf = None
+        context = {"dag_run": mock_dag_run}
+
+        with pytest.raises(ValueError):
+            operator.execute(context)
+
+
+class TestValidateS3ToMongoTask:
+    """Test ValidateS3ToMongoTask operator."""
+
+    def test_execute_success(self):
+        """Test successful execution of validate task."""
+        operator = ValidateS3ToMongoTask(task_id="validate")
+
+        # Mock task instance and XCom
+        mock_ti = Mock()
+        mock_ti.xcom_pull.return_value = {
+            "s3_bucket": "test-bucket",
+            "s3_prefix": "data/",
+            "mongo_collection": "test_collection",
+        }
+        context = {"ti": mock_ti}
+
+        result = operator.execute(context)
+
+        assert result is True
+        mock_ti.xcom_pull.assert_called_once_with(task_ids="prepare")
+
+    def test_execute_with_empty_prefix(self):
+        """Test execution with empty prefix."""
+        operator = ValidateS3ToMongoTask(task_id="validate")
+
+        mock_ti = Mock()
+        mock_ti.xcom_pull.return_value = {
+            "s3_bucket": "test-bucket",
+            "mongo_collection": "test_collection",
+        }
+        context = {"ti": mock_ti}
+
+        result = operator.execute(context)
+
+        assert result is True
+
+
+class TestExecuteS3ToMongoTask:
+    """Test ExecuteS3ToMongoTask operator."""
+
+    def test_execute_success(self):
+        """Test successful execution of execute task."""
+        operator = ExecuteS3ToMongoTask(task_id="execute")
+
+        mock_ti = Mock()
+        mock_ti.xcom_pull.return_value = {
+            "s3_bucket": "test-bucket",
+            "s3_prefix": "data/",
+            "mongo_collection": "test_collection",
+        }
+        context = {"ti": mock_ti}
+
+        result = operator.execute(context)
+
+        assert result["files_processed"] == 5
+        assert result["records_read"] == 10000
+        assert result["records_written"] == 10000
+        assert result["errors"] == 0
+        mock_ti.xcom_pull.assert_called_once_with(task_ids="prepare")
+
+    def test_execute_with_empty_prefix(self):
+        """Test execution with empty prefix."""
+        operator = ExecuteS3ToMongoTask(task_id="execute")
+
+        mock_ti = Mock()
+        mock_ti.xcom_pull.return_value = {
+            "s3_bucket": "test-bucket",
+            "mongo_collection": "test_collection",
+        }
+        context = {"ti": mock_ti}
+
+        result = operator.execute(context)
+
+        assert "files_processed" in result
+        assert "records_read" in result
+        assert "records_written" in result
+
+
+class TestCleanUpS3ToMongoTask:
+    """Test CleanUpS3ToMongoTask operator."""
+
+    def test_execute_success(self):
+        """Test successful execution of cleanup task."""
+        operator = CleanUpS3ToMongoTask(task_id="cleanup")
+
+        mock_ti = Mock()
+        mock_ti.xcom_pull.side_effect = [
+            {
+                "integration_id": 1,
+                "s3_bucket": "test-bucket",
+                "s3_prefix": "data/",
+                "mongo_collection": "test_collection",
+            },
+            {
+                "files_processed": 5,
+                "records_read": 10000,
+                "records_written": 10000,
+                "errors": 0,
+            },
+        ]
+        context = {"ti": mock_ti}
+
+        # Should not raise any exception
+        operator.execute(context)
+
+        # Verify XCom pulls were called
+        assert mock_ti.xcom_pull.call_count == 2
+
+    def test_execute_with_none_config(self):
+        """Test execution with None config."""
+        operator = CleanUpS3ToMongoTask(task_id="cleanup")
+
+        mock_ti = Mock()
+        mock_ti.xcom_pull.side_effect = [None, None]
+        context = {"ti": mock_ti}
+
+        # Should not raise exception even with None values
+        operator.execute(context)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

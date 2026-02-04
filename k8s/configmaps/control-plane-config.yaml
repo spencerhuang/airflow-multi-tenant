@@ -1,0 +1,270 @@
+---
+# Control Plane Configuration ConfigMap
+# This ConfigMap contains all environment variables for the Control Plane service.
+# Mount this ConfigMap as environment variables in control-plane pods.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: control-plane-config
+  namespace: airflow
+  labels:
+    app: control-plane
+    component: config
+metadata:
+  annotations:
+    description: "Control Plane service configuration"
+data:
+  # =============================================================================
+  # Application Settings
+  # =============================================================================
+
+  PROJECT_NAME: "Airflow Multi-Tenant Control Plane"
+  VERSION: "1.0.0"
+  API_V1_STR: "/api/v1"
+
+  # =============================================================================
+  # Database Configuration
+  # =============================================================================
+
+  # MySQL database URL for business data
+  # Format: mysql+pymysql://user:password@host:port/database
+  # Note: Use Secret for password in production
+  DATABASE_URL: "mysql+pymysql://root:root@mysql:3306/airflow_business"
+
+  # =============================================================================
+  # Airflow Integration
+  # =============================================================================
+
+  # Airflow REST API URL
+  AIRFLOW_API_URL: "http://airflow-webserver:8080/api/v1"
+
+  # Airflow API credentials
+  # Note: Use Secret for credentials in production
+  AIRFLOW_USERNAME: "airflow"
+  AIRFLOW_PASSWORD: "airflow"
+
+  # =============================================================================
+  # Security Settings
+  # =============================================================================
+
+  # JWT configuration
+  # Note: Use Secret for SECRET_KEY in production
+  SECRET_KEY: "your-secret-key-change-in-production"
+  ALGORITHM: "HS256"
+  ACCESS_TOKEN_EXPIRE_MINUTES: "30"
+
+  # Enable/disable authentication
+  # Default: False for development
+  # Set to True in production
+  AUTH_ENABLED: "False"
+
+  # =============================================================================
+  # Kafka / CDC Configuration
+  # =============================================================================
+
+  # Kafka bootstrap servers
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+
+  # Kafka topic for CDC events
+  KAFKA_TOPIC_CDC: "cdc.integration.events"
+
+  # Dead Letter Queue Configuration
+  KAFKA_TOPIC_DLQ: "cdc.integration.events.dlq"
+  KAFKA_DLQ_ENABLED: "True"
+  KAFKA_DLQ_MAX_RETRIES: "3"
+
+  # =============================================================================
+  # Backfill Strategy (Section 9 of spec)
+  # =============================================================================
+
+  # Maximum days to backfill (cap)
+  # Default: 7
+  # Runs older than this are skipped
+  MAX_BACKFILL_DAYS: "7"
+
+  # Maximum backfill runs per integration
+  # Default: 7
+  MAX_BACKFILL_RUNS_PER_INTEGRATION: "7"
+
+  # Number of integrations to trigger per batch
+  # Default: 10
+  BACKFILL_BATCH_SIZE: "10"
+
+  # Delay between batches in seconds
+  # Default: 5
+  BACKFILL_BATCH_DELAY_SECONDS: "5"
+
+  # Initial delay for exponential backoff (seconds)
+  # Default: 5
+  BACKFILL_INITIAL_DELAY_SECONDS: "5"
+
+  # Maximum delay for exponential backoff (seconds)
+  # Default: 120 (2 minutes)
+  BACKFILL_MAX_DELAY_SECONDS: "120"
+
+  # Random jitter for midnight spike mitigation (±N seconds)
+  # Default: 5
+  BACKFILL_JITTER_SECONDS: "5"
+
+  # Stagger interval between triggers (milliseconds)
+  # Default: 100
+  BACKFILL_STAGGER_INTERVAL_MS: "100"
+
+  # =============================================================================
+  # DST Handling (Section 7 of spec)
+  # =============================================================================
+
+  # Default timezone for integrations
+  # Default: UTC
+  # Use IANA timezone strings (e.g., America/New_York, Europe/London)
+  DEFAULT_TIMEZONE: "UTC"
+
+  # Enable DST transition checks
+  # Default: True
+  DST_TRANSITION_CHECK_ENABLED: "True"
+
+  # =============================================================================
+  # Worker and Scheduler Configuration
+  # =============================================================================
+
+  # Worker concurrency (optional override)
+  # Leave empty to use Airflow defaults
+  # WORKER_CONCURRENCY: "16"
+
+  # Scheduler parsing processes (optional override)
+  # Leave empty to use Airflow defaults
+  # SCHEDULER_PARSING_PROCESSES: "2"
+
+  # =============================================================================
+  # MinIO / S3 Configuration
+  # =============================================================================
+
+  # MinIO endpoint (S3-compatible storage)
+  MINIO_ENDPOINT: "minio:9000"
+
+  # MinIO credentials
+  # Note: Use Secret for credentials in production
+  MINIO_ACCESS_KEY: "minioadmin"
+  MINIO_SECRET_KEY: "minioadmin"
+
+  # Use HTTPS for MinIO
+  # Default: False (HTTP)
+  MINIO_SECURE: "False"
+
+  # =============================================================================
+  # MongoDB Configuration
+  # =============================================================================
+
+  # MongoDB host
+  MONGO_HOST: "mongo"
+
+  # MongoDB port
+  MONGO_PORT: "27017"
+
+  # MongoDB credentials (optional)
+  # Note: Use Secret for credentials in production
+  # MONGO_USERNAME: "admin"
+  # MONGO_PASSWORD: "password"
+
+  # =============================================================================
+  # OpenTelemetry / Observability
+  # =============================================================================
+
+  # Enable OpenTelemetry
+  # Default: True
+  OTEL_ENABLED: "True"
+
+  # Service name for traces/metrics
+  OTEL_SERVICE_NAME: "control-plane-service"
+
+  # OTEL collector endpoint (optional)
+  # Example: http://otel-collector:4317
+  # OTEL_EXPORTER_ENDPOINT: ""
+
+---
+# Control Plane Secrets (Example - DO NOT use in production as-is)
+# Use proper Kubernetes Secrets with external secret management in production.
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: control-plane-secrets
+  namespace: airflow
+  labels:
+    app: control-plane
+    component: secrets
+type: Opaque
+stringData:
+  # Database password
+  # In production, use external secret management (e.g., Vault, AWS Secrets Manager)
+  DATABASE_PASSWORD: "changeme"
+
+  # Airflow API password
+  AIRFLOW_PASSWORD: "changeme"
+
+  # JWT secret key
+  SECRET_KEY: "change-this-to-a-random-secret-key-in-production"
+
+  # MinIO credentials
+  MINIO_ACCESS_KEY: "changeme"
+  MINIO_SECRET_KEY: "changeme"
+
+  # MongoDB credentials (if auth enabled)
+  MONGO_PASSWORD: "changeme"
+
+---
+# Combined ConfigMap for both Airflow and Control Plane
+# Use this for shared configuration values
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shared-config
+  namespace: airflow
+  labels:
+    app: airflow-multi-tenant
+    component: shared-config
+data:
+  # =============================================================================
+  # Shared Database Configuration
+  # =============================================================================
+
+  # PostgreSQL (Airflow metadata)
+  POSTGRES_HOST: "postgres"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "airflow"
+  POSTGRES_USER: "airflow"
+
+  # MySQL (Business data)
+  MYSQL_HOST: "mysql"
+  MYSQL_PORT: "3306"
+  MYSQL_DATABASE: "airflow_business"
+  MYSQL_USER: "root"
+
+  # =============================================================================
+  # Shared Service Endpoints
+  # =============================================================================
+
+  # Redis (Celery backend)
+  REDIS_HOST: "redis"
+  REDIS_PORT: "6379"
+
+  # Kafka
+  KAFKA_HOST: "kafka"
+  KAFKA_PORT: "9092"
+
+  # MinIO
+  MINIO_HOST: "minio"
+  MINIO_PORT: "9000"
+
+  # MongoDB
+  MONGODB_HOST: "mongo"
+  MONGODB_PORT: "27017"
+
+  # =============================================================================
+  # Shared Logging Configuration
+  # =============================================================================
+
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"

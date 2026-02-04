@@ -1,0 +1,169 @@
+---
+# Airflow Worker Deployment
+# This is an example showing how to mount ConfigMaps as environment variables.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-worker
+  namespace: airflow
+  labels:
+    app: airflow
+    component: worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: airflow
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: airflow
+        component: worker
+    spec:
+      containers:
+        - name: worker
+          image: airflow-multi-tenant:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - airflow
+            - celery
+            - worker
+          env:
+            # Load custom DAG configuration from ConfigMap
+            - name: PYTHONPATH
+              value: "/opt/airflow:/opt/airflow/plugins:/opt/airflow/config"
+          envFrom:
+            # Mount all variables from airflow-config ConfigMap
+            - configMapRef:
+                name: airflow-config
+            # Mount all variables from airflow-env ConfigMap
+            - configMapRef:
+                name: airflow-env
+            # Mount shared configuration
+            - configMapRef:
+                name: shared-config
+            # Mount secrets (for database passwords, etc.)
+            - secretRef:
+                name: airflow-secrets
+                optional: true
+          volumeMounts:
+            - name: dags
+              mountPath: /opt/airflow/dags
+            - name: plugins
+              mountPath: /opt/airflow/plugins
+            - name: config
+              mountPath: /opt/airflow/config
+            - name: logs
+              mountPath: /opt/airflow/logs
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "airflow jobs check --job-type CeleryExecutor --hostname $(hostname)"
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "airflow jobs check --job-type CeleryExecutor --hostname $(hostname)"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: dags
+          persistentVolumeClaim:
+            claimName: airflow-dags
+        - name: plugins
+          persistentVolumeClaim:
+            claimName: airflow-plugins
+        - name: config
+          persistentVolumeClaim:
+            claimName: airflow-config-pvc
+        - name: logs
+          persistentVolumeClaim:
+            claimName: airflow-logs
+      restartPolicy: Always
+
+---
+# KEDA ScaledObject for Worker Autoscaling
+# This automatically scales workers based on task queue depth.
+
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: airflow-worker-scaler
+  namespace: airflow
+spec:
+  scaleTargetRef:
+    name: airflow-worker
+    kind: Deployment
+  pollingInterval: 30  # Check every 30 seconds
+  cooldownPeriod: 300  # Wait 5 minutes before scaling down
+  minReplicaCount: 2   # Always keep 2 workers minimum
+  maxReplicaCount: 50  # Scale up to 50 workers maximum
+  triggers:
+    # Scale based on PostgreSQL task queue depth
+    - type: postgresql
+      metadata:
+        connectionFromEnv: POSTGRES_CONNECTION_STRING
+        query: >
+          SELECT COUNT(*)
+          FROM task_instance
+          WHERE state IN ('queued', 'scheduled')
+        targetQueryValue: "10"  # Scale up when >10 tasks queued per worker
+
+---
+# Horizontal Pod Autoscaler (HPA) - Alternative to KEDA
+# Use this if KEDA is not available.
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: airflow-worker-hpa
+  namespace: airflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: airflow-worker
+  minReplicas: 2
+  maxReplicas: 50
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Wait 5 minutes before scaling down
+      policies:
+        - type: Percent
+          value: 50  # Scale down max 50% at a time
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0  # Scale up immediately
+      policies:
+        - type: Percent
+          value: 100  # Double capacity at a time
+          periodSeconds: 15

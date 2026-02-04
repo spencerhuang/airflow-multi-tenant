@@ -1,0 +1,44 @@
+# Minimal requirements for running tests
+# This file avoids the heavy Airflow dependencies
+
+# Testing
+pytest==9.0.2
+pytest-asyncio==1.3.0
+pytest-cov==7.0.0
+pytest-mock==3.15.1
+httpx==0.28.1
+faker==40.1.2
+
+# FastAPI and web framework
+fastapi==0.128.0
+uvicorn==0.40.0
+pydantic==2.12.5
+pydantic-settings==2.12.0
+
+# Database
+sqlalchemy==2.0.46
+pymysql==1.1.2
+cryptography==46.0.4
+
+# AWS
+boto3==1.42.41
+botocore==1.42.41
+
+# Azure
+azure-storage-blob==12.28.0
+azure-identity==1.25.1
+
+# MongoDB
+pymongo==4.16.0
+
+# Kafka/CDC
+kafka-python==2.3.0
+
+# Authentication
+python-jose[cryptography]==3.5.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.22
+
+# Utilities
+python-dateutil==2.9.0.post0
+requests==2.32.5

@@ -1,0 +1,202 @@
+---
+# MySQL StatefulSet for Control Plane Database
+# This StatefulSet provides persistent storage and stable network identity for MySQL
+# Includes Debezium CDC configuration and permissions
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-config
+  namespace: airflow
+  labels:
+    app: mysql
+    component: database
+data:
+  mysql.cnf: |
+    # MySQL Configuration for Debezium CDC
+    [mysqld]
+    # Server ID (required for replication)
+    server-id = 1
+
+    # Enable binary logging (required for CDC)
+    log_bin = mysql-bin
+    binlog_format = ROW
+    binlog_row_image = FULL
+
+    # Binary log retention (7 days)
+    binlog_expire_logs_seconds = 604800
+
+    # GTID mode (optional, but recommended for replication)
+    gtid_mode = ON
+    enforce_gtid_consistency = ON
+
+    # Performance optimizations
+    max_connections = 200
+    innodb_buffer_pool_size = 256M
+
+    # Character set
+    character-set-server = utf8mb4
+    collation-server = utf8mb4_unicode_ci
+
+  init.sql: |
+    -- MySQL initialization script for Control Plane database
+    -- This script runs automatically when MySQL starts for the first time
+
+    -- Grant Debezium CDC permissions to control_plane user
+    -- These permissions are required for Debezium to capture change data
+    GRANT SELECT ON control_plane.* TO 'control_plane'@'%';
+    GRANT RELOAD ON *.* TO 'control_plane'@'%';
+    GRANT SHOW DATABASES ON *.* TO 'control_plane'@'%';
+    GRANT REPLICATION SLAVE ON *.* TO 'control_plane'@'%';
+    GRANT REPLICATION CLIENT ON *.* TO 'control_plane'@'%';
+
+    -- Grant FLUSH_TABLES for snapshot operations
+    GRANT FLUSH_TABLES ON *.* TO 'control_plane'@'%';
+
+    -- Apply privileges
+    FLUSH PRIVILEGES;
+
+    -- Enable binlog (required for CDC)
+    -- Note: This must also be set in my.cnf for persistent configuration
+    SET GLOBAL binlog_format = 'ROW';
+    SET GLOBAL binlog_row_image = 'FULL';
+
+    -- Log that initialization completed
+    SELECT 'MySQL initialization complete - Debezium CDC permissions granted' AS status;
+
+---
+# MySQL Secret for credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: airflow
+  labels:
+    app: mysql
+    component: database
+type: Opaque
+stringData:
+  MYSQL_ROOT_PASSWORD: "root"
+  MYSQL_PASSWORD: "control_plane"
+
+---
+# MySQL Service (Headless for StatefulSet)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: airflow
+  labels:
+    app: mysql
+    component: database
+spec:
+  ports:
+    - port: 3306
+      name: mysql
+      protocol: TCP
+  clusterIP: None
+  selector:
+    app: mysql
+
+---
+# MySQL StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: airflow
+  labels:
+    app: mysql
+    component: database
+  annotations:
+    description: "MySQL database with Debezium CDC support"
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+        component: database
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.0
+          ports:
+            - containerPort: 3306
+              name: mysql
+              protocol: TCP
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_ROOT_PASSWORD
+            - name: MYSQL_DATABASE
+              value: "control_plane"
+            - name: MYSQL_USER
+              value: "control_plane"
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: MYSQL_PASSWORD
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+            - name: mysql-config
+              mountPath: /etc/mysql/conf.d/mysql.cnf
+              subPath: mysql.cnf
+              readOnly: true
+            - name: mysql-config
+              mountPath: /docker-entrypoint-initdb.d/01-init.sql
+              subPath: init.sql
+              readOnly: true
+          livenessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - mysqladmin
+                - ping
+                - -h
+                - localhost
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+      volumes:
+        - name: mysql-config
+          configMap:
+            name: mysql-config
+  volumeClaimTemplates:
+    - metadata:
+        name: mysql-data
+        labels:
+          app: mysql
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+        # Uncomment and set storage class if needed
+        # storageClassName: standard

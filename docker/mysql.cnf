@@ -1,0 +1,26 @@
+# MySQL Configuration for Debezium CDC
+# This file is mounted to /etc/mysql/conf.d/mysql.cnf in the MySQL container
+
+[mysqld]
+# Server ID (required for replication)
+server-id = 1
+
+# Enable binary logging (required for CDC)
+log_bin = mysql-bin
+binlog_format = ROW
+binlog_row_image = FULL
+
+# Binary log retention (7 days)
+binlog_expire_logs_seconds = 604800
+
+# GTID mode (optional, but recommended for replication)
+gtid_mode = ON
+enforce_gtid_consistency = ON
+
+# Performance optimizations
+max_connections = 200
+innodb_buffer_pool_size = 256M
+
+# Character set
+character-set-server = utf8mb4
+collation-server = utf8mb4_unicode_ci

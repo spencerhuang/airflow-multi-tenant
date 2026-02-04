@@ -1,0 +1,29 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    default-libmysqlclient-dev \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements (control plane specific - no Airflow)
+COPY requirements-control-plane.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements-control-plane.txt
+
+# Copy application code
+COPY control_plane /app/control_plane
+COPY connectors /app/connectors
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Expose port
+EXPOSE 8000
+
+# Run the application
+CMD ["uvicorn", "control_plane.app.main:app", "--host", "0.0.0.0", "--port", "8000"]

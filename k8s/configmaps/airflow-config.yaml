@@ -1,0 +1,196 @@
+---
+# Airflow Configuration ConfigMap
+# This ConfigMap contains all environment variables for Airflow DAGs and tasks.
+# Mount this ConfigMap as environment variables in Airflow scheduler and worker pods.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-config
+  namespace: airflow
+  labels:
+    app: airflow
+    component: config
+metadata:
+  annotations:
+    description: "Airflow DAG and task configuration"
+data:
+  # =============================================================================
+  # DAG Concurrency Settings
+  # =============================================================================
+
+  # Maximum number of concurrent DAG instances for daily scheduled DAGs
+  # Default: 10
+  # Recommended: 10-20 for production
+  AIRFLOW_MAX_ACTIVE_RUNS: "10"
+
+  # Maximum number of concurrent tasks per DAG run
+  # Default: 5
+  # Recommended: 5-10 based on worker capacity
+  # CRITICAL: Prevents worker exhaustion
+  AIRFLOW_MAX_ACTIVE_TASKS: "5"
+
+  # Maximum number of concurrent DAG instances for on-demand DAGs
+  # Default: 50
+  # Recommended: 50-100 for high-volume CDC triggers
+  AIRFLOW_MAX_ACTIVE_RUNS_ONDEMAND: "50"
+
+  # =============================================================================
+  # Schedule Settings
+  # =============================================================================
+
+  # Whether to automatically backfill missed DAG runs
+  # Default: False (recommended - prevents backfill storms)
+  AIRFLOW_CATCHUP: "False"
+
+  # Start date for DAGs (year, month, day)
+  # Default: 2024-01-01
+  AIRFLOW_START_DATE_YEAR: "2024"
+  AIRFLOW_START_DATE_MONTH: "1"
+  AIRFLOW_START_DATE_DAY: "1"
+
+  # =============================================================================
+  # Retry Settings
+  # =============================================================================
+
+  # Number of retry attempts for failed tasks
+  # Default: 3
+  # Recommended: 3-5 for production
+  AIRFLOW_RETRIES: "3"
+
+  # Initial retry delay in minutes
+  # Default: 1
+  # Recommended: 1-2 for fast recovery from transient failures
+  AIRFLOW_RETRY_DELAY_MINUTES: "1"
+
+  # Enable exponential backoff for retries
+  # Default: True (recommended)
+  # Retry timeline: 1min, 2min, 4min, 8min...
+  AIRFLOW_RETRY_EXPONENTIAL_BACKOFF: "True"
+
+  # Maximum retry delay in minutes (cap for exponential backoff)
+  # Default: 15
+  # Recommended: 15-30 minutes
+  AIRFLOW_MAX_RETRY_DELAY_MINUTES: "15"
+
+  # =============================================================================
+  # Task Settings
+  # =============================================================================
+
+  # Whether tasks depend on past DAG run success
+  # Default: False
+  # Set to True only if data consistency requires it
+  AIRFLOW_DEPENDS_ON_PAST: "False"
+
+  # Send email on task failure
+  # Default: False
+  # Set to True and configure SMTP for production alerts
+  AIRFLOW_EMAIL_ON_FAILURE: "False"
+
+  # Send email on task retry
+  # Default: False
+  AIRFLOW_EMAIL_ON_RETRY: "False"
+
+  # Task execution timeout in minutes (optional)
+  # Default: None (no timeout)
+  # Uncomment and set value if needed:
+  # AIRFLOW_EXECUTION_TIMEOUT_MINUTES: "60"
+
+  # =============================================================================
+  # Sensor Settings (if sensors are used)
+  # =============================================================================
+
+  # Sensor mode: 'reschedule' or 'poke'
+  # Default: reschedule (recommended - frees worker between checks)
+  # CRITICAL: Always use 'reschedule' to prevent worker blocking
+  AIRFLOW_SENSOR_MODE: "reschedule"
+
+  # Interval between sensor checks in seconds
+  # Default: 60
+  # Recommended: 60-300 based on use case
+  AIRFLOW_SENSOR_POKE_INTERVAL_SECONDS: "60"
+
+  # Sensor timeout in seconds
+  # Default: 3600 (1 hour)
+  # Recommended: 1800-7200 based on expected wait time
+  AIRFLOW_SENSOR_TIMEOUT_SECONDS: "3600"
+
+  # =============================================================================
+  # Control Plane Integration
+  # =============================================================================
+
+  # Control plane API URL
+  # Default: http://control-plane:8000
+  # Update to match your service name and port
+  CONTROL_PLANE_API_URL: "http://control-plane:8000"
+
+  # Control plane API timeout in seconds
+  # Default: 30
+  CONTROL_PLANE_API_TIMEOUT_SECONDS: "30"
+
+  # =============================================================================
+  # Backfill Settings (Section 9 of spec)
+  # =============================================================================
+
+  # Maximum days to backfill
+  # Default: 7
+  # Runs older than this are skipped
+  AIRFLOW_MAX_BACKFILL_DAYS: "7"
+
+  # Maximum backfill runs per integration
+  # Default: 7
+  AIRFLOW_MAX_BACKFILL_RUNS_PER_INTEGRATION: "7"
+
+  # Number of integrations to backfill per batch
+  # Default: 10
+  AIRFLOW_BACKFILL_BATCH_SIZE: "10"
+
+  # Delay between backfill batches in seconds
+  # Default: 5
+  # Used for exponential backoff: 5, 10, 20, 40...
+  AIRFLOW_BACKFILL_BATCH_DELAY_SECONDS: "5"
+
+  # =============================================================================
+  # DST Handling (Section 7 of spec)
+  # =============================================================================
+
+  # Default timezone for schedules
+  # Default: UTC
+  # Use IANA timezone strings (e.g., America/New_York)
+  AIRFLOW_DEFAULT_TIMEZONE: "UTC"
+
+---
+# Airflow Environment ConfigMap
+# This ConfigMap contains Airflow-specific environment variables.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: airflow-env
+  namespace: airflow
+  labels:
+    app: airflow
+    component: env
+data:
+  # Airflow Core Settings
+  AIRFLOW__CORE__EXECUTOR: "CeleryExecutor"
+  AIRFLOW__CORE__DAGS_FOLDER: "/opt/airflow/dags"
+  AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+  AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS: "False"
+
+  # Webserver Settings
+  AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+  AIRFLOW__WEBSERVER__RBAC: "True"
+
+  # Scheduler Settings
+  AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "300"
+  AIRFLOW__SCHEDULER__PARSING_PROCESSES: "2"
+
+  # Celery Settings
+  AIRFLOW__CELERY__WORKER_CONCURRENCY: "16"
+  AIRFLOW__CELERY__BROKER_URL: "redis://redis:6379/0"
+  AIRFLOW__CELERY__RESULT_BACKEND: "db+postgresql://airflow:airflow@postgres:5432/airflow"
+
+  # Logging
+  AIRFLOW__LOGGING__REMOTE_LOGGING: "False"
+  AIRFLOW__LOGGING__LOGGING_LEVEL: "INFO"
