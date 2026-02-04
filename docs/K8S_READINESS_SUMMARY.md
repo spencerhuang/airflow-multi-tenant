@@ -62,8 +62,8 @@ default_args = {
 }
 
 with DAG(
-    max_active_runs=10,
-    max_active_tasks=5,
+    max_active_runs=100,
+    max_active_tasks=50,
 ):
 ```
 
@@ -220,8 +220,8 @@ All configuration has fallback defaults that are used when environment variables
 
 ### Airflow Defaults
 ```python
-AIRFLOW_MAX_ACTIVE_RUNS = 10
-AIRFLOW_MAX_ACTIVE_TASKS = 5
+AIRFLOW_MAX_ACTIVE_RUNS = 100
+AIRFLOW_MAX_ACTIVE_TASKS = 30
 AIRFLOW_MAX_ACTIVE_RUNS_ONDEMAND = 50
 AIRFLOW_RETRIES = 3
 AIRFLOW_RETRY_DELAY_MINUTES = 1
@@ -267,8 +267,8 @@ metadata:
   name: airflow-config
   namespace: airflow-dev
 data:
-  AIRFLOW_MAX_ACTIVE_RUNS: "5"        # Lower limits for dev
-  AIRFLOW_MAX_ACTIVE_TASKS: "3"
+  AIRFLOW_MAX_ACTIVE_RUNS: "50"        # Lower limits for dev
+  AIRFLOW_MAX_ACTIVE_TASKS: "30"
   AIRFLOW_RETRIES: "1"
   LOG_LEVEL: "DEBUG"
 ```
@@ -289,9 +289,9 @@ metadata:
   name: airflow-config
   namespace: airflow-prod
 data:
-  AIRFLOW_MAX_ACTIVE_RUNS: "20"       # Higher limits for prod
-  AIRFLOW_MAX_ACTIVE_TASKS: "10"
-  AIRFLOW_MAX_ACTIVE_RUNS_ONDEMAND: "100"
+  AIRFLOW_MAX_ACTIVE_RUNS: "100"       # Higher limits for prod
+  AIRFLOW_MAX_ACTIVE_TASKS: "30"
+  AIRFLOW_MAX_ACTIVE_RUNS_ONDEMAND: "50"
   AIRFLOW_RETRIES: "5"
   AIRFLOW_EMAIL_ON_FAILURE: "True"    # Enable alerts
   AUTH_ENABLED: "True"                # Enable authentication
@@ -314,8 +314,8 @@ kubectl apply -f k8s/argocd/application-prod.yaml
 kubectl exec -n airflow deployment/airflow-worker -- env | grep AIRFLOW_
 
 # Expected output:
-AIRFLOW_MAX_ACTIVE_RUNS=20
-AIRFLOW_MAX_ACTIVE_TASKS=10
+AIRFLOW_MAX_ACTIVE_RUNS=100
+AIRFLOW_MAX_ACTIVE_TASKS=30
 AIRFLOW_RETRIES=5
 ...
 ```
@@ -328,7 +328,7 @@ kubectl logs -n airflow deployment/airflow-worker | grep "Configuration"
 
 # Expected output:
 === Airflow Configuration (from environment) ===
-Max Active Runs (Daily): 20
+Max Active Runs (Daily): 100
 Max Active Tasks: 10
 Max Active Runs (On-Demand): 100
 Retries: 5

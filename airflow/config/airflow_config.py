@@ -69,8 +69,8 @@ class DAGConfig:
         Create DAGConfig from environment variables.
 
         Environment variables:
-            AIRFLOW_MAX_ACTIVE_RUNS (default: 10)
-            AIRFLOW_MAX_ACTIVE_TASKS (default: 5)
+            AIRFLOW_MAX_ACTIVE_RUNS (default: 100)
+            AIRFLOW_MAX_ACTIVE_TASKS (default: 30)
             AIRFLOW_MAX_ACTIVE_RUNS_ONDEMAND (default: 50)
             AIRFLOW_CATCHUP (default: False)
             AIRFLOW_START_DATE_YEAR (default: 2024)
@@ -93,8 +93,8 @@ class DAGConfig:
         """
         return cls(
             # Concurrency settings
-            max_active_runs=int(os.getenv("AIRFLOW_MAX_ACTIVE_RUNS", "10")),
-            max_active_tasks=int(os.getenv("AIRFLOW_MAX_ACTIVE_TASKS", "5")),
+            max_active_runs=int(os.getenv("AIRFLOW_MAX_ACTIVE_RUNS", "100")),
+            max_active_tasks=int(os.getenv("AIRFLOW_MAX_ACTIVE_TASKS", "50")),
             max_active_runs_ondemand=int(
                 os.getenv("AIRFLOW_MAX_ACTIVE_RUNS_ONDEMAND", "50")
             ),

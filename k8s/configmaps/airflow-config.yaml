@@ -22,13 +22,13 @@ data:
   # Maximum number of concurrent DAG instances for daily scheduled DAGs
   # Default: 10
   # Recommended: 10-20 for production
-  AIRFLOW_MAX_ACTIVE_RUNS: "10"
+  AIRFLOW_MAX_ACTIVE_RUNS: "100"
 
   # Maximum number of concurrent tasks per DAG run
   # Default: 5
   # Recommended: 5-10 based on worker capacity
   # CRITICAL: Prevents worker exhaustion
-  AIRFLOW_MAX_ACTIVE_TASKS: "5"
+  AIRFLOW_MAX_ACTIVE_TASKS: "30"
 
   # Maximum number of concurrent DAG instances for on-demand DAGs
   # Default: 50

@@ -49,6 +49,8 @@ Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Control Plane Service
 ```
 
 ## Quick Start
+[SETUP_COMPLETED.md](SETUP_COMPLETE.md)
+[MYSQL_CDC_SETUP.md](MYSQL_CDC_SETUP.md)
 
 ### Prerequisites
 
@@ -67,22 +69,22 @@ docker-compose up -d
 - Control Plane API: http://localhost:8000
 - API Documentation: http://localhost:8000/docs
 
+![Docker local](docs/Screenshot 2026-02-04 at 10.56.10 AM.png)
+
 ### Running Tests
 
-```bash
-# Install dependencies
-pip install -r requirements-dev.txt
+[TESTING.md](TESTING.md)
+[E2E_TEST_GUIDE.md](E2E_TEST_GUIDE.md)
 
-# Run all tests
-pytest
+![Test in local](docs/Screenshot 2026-02-04 at 8.47.22 AM.png)
 
-# Run specific test suites
-pytest control_plane/tests/
-pytest connectors/tests/
-pytest airflow/tests/
-```
+![Test in local e2e](docs/Screenshot 2026-02-04 at 10.51.29 AM.png)
+
+![Test in local e2e](docs/Screenshot 2026-02-04 at 10.50.41 AM.png)
 
 ## Key Components
+
+[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)
 
 ### Control Plane Service
 
@@ -102,12 +104,8 @@ Reusable modules wrapping data source APIs:
 
 ### Airflow DAGs
 
-- **Daily Scheduled DAGs**: Pre-created DAGs for each hour (00-23)
+- **Daily Scheduled DAGs**: Pre-created DAGs for each hour (00-23) per workflow
 - **On-Demand DAG**: Triggered via API for CDC, manual replays, and backfills
-
-## Configuration
-
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for detailed configuration options.
 
 ## Testing Strategy
 
@@ -115,6 +113,12 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for detailed configuration op
 - **Connector tests**: Mock SDK clients, contract tests
 - **DAG validation**: Static import-only tests
 - **Integration tests**: End-to-end CDC flow
+
+## TODO
+
+- Implementation of 24 static dags per workflow, only completed 1 static dag for demostration
+- k8s deployment not verified
+- Busy-Time Mitigation in section 9.3 was not implemented
 
 ## License
 

@@ -150,17 +150,17 @@ All Airflow DAG settings are configured via the `airflow-config` ConfigMap.
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `AIRFLOW_MAX_ACTIVE_RUNS` | 10 | Max concurrent DAG instances (daily) |
-| `AIRFLOW_MAX_ACTIVE_TASKS` | 5 | Max concurrent tasks per DAG run |
+| `AIRFLOW_MAX_ACTIVE_RUNS` | 100 | Max concurrent DAG instances (daily) |
+| `AIRFLOW_MAX_ACTIVE_TASKS` | 30 | Max concurrent tasks per DAG run |
 | `AIRFLOW_MAX_ACTIVE_RUNS_ONDEMAND` | 50 | Max concurrent on-demand DAGs |
 
 **Example:**
 ```yaml
 # k8s/configmaps/airflow-config.yaml
 data:
-  AIRFLOW_MAX_ACTIVE_RUNS: "20"        # Increased for production
-  AIRFLOW_MAX_ACTIVE_TASKS: "10"       # More tasks per run
-  AIRFLOW_MAX_ACTIVE_RUNS_ONDEMAND: "100"  # Higher CDC capacity
+  AIRFLOW_MAX_ACTIVE_RUNS: "100"        # Increased for production
+  AIRFLOW_MAX_ACTIVE_TASKS: "30"       # More tasks per run
+  AIRFLOW_MAX_ACTIVE_RUNS_ONDEMAND: "50"  # Higher CDC capacity
 ```
 
 #### Retry Settings
@@ -446,8 +446,8 @@ metadata:
   name: airflow-config
   namespace: airflow-dev
 data:
-  AIRFLOW_MAX_ACTIVE_RUNS: "5"           # Lower limits
-  AIRFLOW_MAX_ACTIVE_TASKS: "3"
+  AIRFLOW_MAX_ACTIVE_RUNS: "100"           # Lower limits
+  AIRFLOW_MAX_ACTIVE_TASKS: "30"
   AIRFLOW_RETRIES: "1"                   # Fewer retries
   AIRFLOW_RETRY_DELAY_MINUTES: "1"
   LOG_LEVEL: "DEBUG"                     # More logging
@@ -463,8 +463,8 @@ metadata:
   name: airflow-config
   namespace: airflow-staging
 data:
-  AIRFLOW_MAX_ACTIVE_RUNS: "10"
-  AIRFLOW_MAX_ACTIVE_TASKS: "5"
+  AIRFLOW_MAX_ACTIVE_RUNS: "100"
+  AIRFLOW_MAX_ACTIVE_TASKS: "30"
   AIRFLOW_RETRIES: "3"
   LOG_LEVEL: "INFO"
 ```
@@ -479,9 +479,9 @@ metadata:
   name: airflow-config
   namespace: airflow-prod
 data:
-  AIRFLOW_MAX_ACTIVE_RUNS: "20"          # Higher limits
-  AIRFLOW_MAX_ACTIVE_TASKS: "10"
-  AIRFLOW_MAX_ACTIVE_RUNS_ONDEMAND: "100"
+  AIRFLOW_MAX_ACTIVE_RUNS: "100"          # Higher limits
+  AIRFLOW_MAX_ACTIVE_TASKS: "30"
+  AIRFLOW_MAX_ACTIVE_RUNS_ONDEMAND: "50"
   AIRFLOW_RETRIES: "5"                   # More retries
   AIRFLOW_EMAIL_ON_FAILURE: "True"       # Enable alerts
   AUTH_ENABLED: "True"                   # Enable auth
@@ -569,8 +569,8 @@ spec:
 kubectl exec -n airflow deployment/airflow-worker -- env | grep AIRFLOW_
 
 # Expected output:
-AIRFLOW_MAX_ACTIVE_RUNS=10
-AIRFLOW_MAX_ACTIVE_TASKS=5
+AIRFLOW_MAX_ACTIVE_RUNS=100
+AIRFLOW_MAX_ACTIVE_TASKS=30
 AIRFLOW_RETRIES=3
 ...
 ```

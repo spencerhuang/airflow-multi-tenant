@@ -507,8 +507,8 @@ class ValidateS3ToMongoTask(ValidateTask):
 ```python
 with DAG(
     dag_id="s3_to_mongo_daily_02",
-    max_active_runs=10,              # Limit concurrent DAG instances
-    max_active_tasks=5,              # ✅ REQUIRED - prevents worker exhaustion
+    max_active_runs=100,              # Limit concurrent DAG instances
+    max_active_tasks=50,              # ✅ REQUIRED - prevents worker exhaustion
     catchup=False,
 ):
 ```
