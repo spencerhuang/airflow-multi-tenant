@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     OTEL_SERVICE_NAME: str = "control-plane-service"
     OTEL_EXPORTER_ENDPOINT: Optional[str] = None
 
+    # Logging
+    LOG_LEVEL: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
+    LOG_FORMAT: str = "json"  # json or text
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

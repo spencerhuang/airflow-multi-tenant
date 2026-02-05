@@ -11,13 +11,16 @@ Use cases:
 - Apply jitter to high-traffic periods
 """
 
+import asyncio
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from collections import defaultdict
 
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from control_plane.app.models.integration import Integration
+from control_plane.app.core.retry import DB_RETRY, DB_TIMEOUT
 
 
 @dataclass
@@ -83,8 +86,9 @@ class HotspotService:
     CDC_ONDEMAND_PERCENTAGE = 0.05  # 5% of integrations
 
     @staticmethod
-    def analyze_hotspots(
-        db: Session,
+    @DB_RETRY
+    async def analyze_hotspots(
+        db: AsyncSession,
         start_date: Optional[datetime] = None,
         days: int = 10,
         hotspot_threshold: Optional[int] = None,
@@ -93,7 +97,7 @@ class HotspotService:
         Analyze scheduling hotspots for the next N days.
 
         Args:
-            db: Database session
+            db: Async database session
             start_date: Start date (default: now UTC)
             days: Number of days to forecast (default: 10)
             hotspot_threshold: Runs threshold for hotspot (default: 100)
@@ -101,43 +105,49 @@ class HotspotService:
         Returns:
             Dictionary with hourly forecast and identified hotspots
         """
-        if start_date is None:
-            start_date = datetime.utcnow().replace(
-                minute=0, second=0, microsecond=0
+        async def _execute():
+            if start_date is None:
+                current_start_date = datetime.utcnow().replace(
+                    minute=0, second=0, microsecond=0
+                )
+            else:
+                current_start_date = start_date
+
+            if hotspot_threshold is None:
+                current_hotspot_threshold = HotspotService.DEFAULT_HOTSPOT_THRESHOLD
+            else:
+                current_hotspot_threshold = hotspot_threshold
+
+            end_date = current_start_date + timedelta(days=days)
+
+            # Get all active integrations
+            result = await db.execute(
+                select(Integration).where(Integration.usr_sch_status == "active")
+            )
+            integrations = list(result.scalars().all())
+
+            # Calculate hourly forecast
+            hourly_forecasts = HotspotService._calculate_hourly_forecast(
+                integrations, current_start_date, end_date, current_hotspot_threshold
             )
 
-        if hotspot_threshold is None:
-            hotspot_threshold = HotspotService.DEFAULT_HOTSPOT_THRESHOLD
+            # Identify hotspots
+            hotspots = HotspotService._identify_hotspots(hourly_forecasts)
 
-        end_date = start_date + timedelta(days=days)
+            # Calculate statistics
+            stats = HotspotService._calculate_statistics(hourly_forecasts)
 
-        # Get all active integrations
-        integrations = (
-            db.query(Integration)
-            .filter(Integration.usr_sch_status == "active")
-            .all()
-        )
-
-        # Calculate hourly forecast
-        hourly_forecasts = HotspotService._calculate_hourly_forecast(
-            integrations, start_date, end_date, hotspot_threshold
-        )
-
-        # Identify hotspots
-        hotspots = HotspotService._identify_hotspots(hourly_forecasts)
-
-        # Calculate statistics
-        stats = HotspotService._calculate_statistics(hourly_forecasts)
-
-        return {
-            "start_date": start_date.isoformat(),
-            "end_date": end_date.isoformat(),
-            "total_active_integrations": len(integrations),
-            "hotspot_threshold": hotspot_threshold,
-            "hourly_forecast": [f.to_dict() for f in hourly_forecasts],
-            "hotspots": [h.to_dict() for h in hotspots],
-            "statistics": stats,
-        }
+            return {
+                "start_date": current_start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "total_active_integrations": len(integrations),
+                "hotspot_threshold": current_hotspot_threshold,
+                "hourly_forecast": [f.to_dict() for f in hourly_forecasts],
+                "hotspots": [h.to_dict() for h in hotspots],
+                "statistics": stats,
+            }
+        
+        return await asyncio.wait_for(_execute(), timeout=DB_TIMEOUT)
 
     @staticmethod
     def _calculate_hourly_forecast(

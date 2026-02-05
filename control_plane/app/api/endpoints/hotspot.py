@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.app.core.database import get_db
 from control_plane.app.services.hotspot_service import HotspotService
@@ -18,7 +18,7 @@ router = APIRouter()
 
 
 @router.get("/hotspot", tags=["hotspot"])
-def analyze_hotspots(
+async def analyze_hotspots(
     days: int = Query(
         default=10,
         ge=1,
@@ -34,7 +34,7 @@ def analyze_hotspots(
         default=None,
         description="Start date in ISO format (default: now UTC)",
     ),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Analyze scheduling hotspots for capacity planning.
@@ -115,7 +115,7 @@ def analyze_hotspots(
             parsed_start_date = None  # Will use default (now)
 
     # Analyze hotspots
-    result = HotspotService.analyze_hotspots(
+    result = await HotspotService.analyze_hotspots(
         db=db,
         start_date=parsed_start_date,
         days=days,
@@ -126,9 +126,9 @@ def analyze_hotspots(
 
 
 @router.get("/hotspot/summary", tags=["hotspot"])
-def get_hotspot_summary(
+async def get_hotspot_summary(
     days: int = Query(default=7, ge=1, le=30),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Get a quick summary of upcoming hotspots.
@@ -153,7 +153,7 @@ def get_hotspot_summary(
     ```
     """
     # Get full analysis
-    result = HotspotService.analyze_hotspots(
+    result = await HotspotService.analyze_hotspots(
         db=db,
         days=days,
     )

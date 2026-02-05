@@ -1,10 +1,8 @@
 version: '3.8'
 
-x-airflow-common:
-  &airflow-common
+x-airflow-common: &airflow-common
   image: apache/airflow:2.8.1-python3.11
-  environment:
-    &airflow-common-env
+  environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
     AIRFLOW__CORE__FERNET_KEY: ''
@@ -22,8 +20,7 @@ x-airflow-common:
     - ./connectors:/opt/airflow/connectors
     - airflow-logs:/opt/airflow/logs
   user: "${AIRFLOW_UID:-50000}:0"
-  depends_on:
-    &airflow-common-depends-on
+  depends_on: &airflow-common-depends-on
     postgres-airflow:
       condition: service_healthy
 
@@ -44,7 +41,7 @@ services:
       - ./docker/mysql.cnf:/etc/mysql/conf.d/mysql.cnf:ro
       - ./docker/mysql-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -62,7 +59,7 @@ services:
     volumes:
       - postgres-airflow-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "airflow"]
+      test: [ "CMD", "pg_isready", "-U", "airflow" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -100,7 +97,7 @@ services:
     volumes:
       - minio-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -158,7 +155,7 @@ services:
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       ENABLE_DEBEZIUM_SCRIPTING: "true"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8083/"]
+      test: [ "CMD", "curl", "-f", "http://localhost:8083/" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -194,6 +191,22 @@ services:
       KAFKA_CONNECT_URIS: http://kafka-connect:8083
     restart: always
 
+  # One-shot service to register Debezium CDC connector
+  debezium-register:
+    image: python:3.11-slim
+    container_name: debezium-register
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+    working_dir: /app
+    environment:
+      # Use in-cluster address for Kafka Connect
+      KAFKA_CONNECT_URL: http://kafka-connect:8083
+    volumes:
+      - .:/app
+    entrypoint: ["python", "debezium/register_connector.py", "--force"]
+    restart: "on-failure"
+
   # Airflow Webserver
   airflow-webserver:
     <<: *airflow-common
@@ -202,7 +215,7 @@ services:
     ports:
       - "8080:8080"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/health" ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -219,7 +232,7 @@ services:
     container_name: airflow-scheduler
     command: scheduler
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      test: [ "CMD", "curl", "--fail", "http://localhost:8974/health" ]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -240,8 +253,7 @@ services:
       - |
         mkdir -p /sources/logs /sources/dags /sources/plugins
         chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
-        exec /entrypoint airflow version
-        airflow db init
+        /entrypoint airflow db migrate
         airflow users create \
           --username airflow \
           --firstname Airflow \
@@ -266,7 +278,7 @@ services:
       dockerfile: docker/Dockerfile.control-plane
     container_name: control-plane-service
     environment:
-      DATABASE_URL: mysql+pymysql://control_plane:control_plane@mysql:3306/control_plane
+      DATABASE_URL: mysql+aiomysql://control_plane:control_plane@mysql:3306/control_plane
       AIRFLOW_API_URL: http://airflow-webserver:8080/api/v1
       AIRFLOW_USERNAME: airflow
       AIRFLOW_PASSWORD: airflow

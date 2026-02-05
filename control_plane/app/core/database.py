@@ -1,41 +1,47 @@
 """Database configuration and session management."""
 
-from sqlalchemy import create_engine
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-from typing import Generator
+from typing import AsyncGenerator
 
 from control_plane.app.core.config import settings
 
-# Create database engine
-engine = create_engine(
-    settings.DATABASE_URL,
+# Convert DATABASE_URL to use async driver
+# Replace mysql+pymysql:// with mysql+aiomysql:// for async support
+async_database_url = settings.DATABASE_URL.replace('mysql+pymysql://', 'mysql+aiomysql://')
+
+# Create async database engine
+engine = create_async_engine(
+    async_database_url,
+    echo=False,
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
 )
 
-# Create session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# Create async session factory
+AsyncSessionLocal = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
 
 # Create base class for models
 Base = declarative_base()
 
 
-def get_db() -> Generator:
+async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
-    Dependency function that yields database sessions.
+    Dependency function that yields async database sessions.
 
     Yields:
-        Database session
+        AsyncSession: Async database session
 
     Example:
         @app.get("/items")
-        def get_items(db: Session = Depends(get_db)):
-            return db.query(Item).all()
+        async def get_items(db: AsyncSession = Depends(get_db)):
+            result = await db.execute(select(Item))
+            return result.scalars().all()
     """
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    async with AsyncSessionLocal() as session:
+        yield session

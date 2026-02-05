@@ -1,23 +1,30 @@
 """Unit tests for Integration Service."""
 
 import pytest
-from unittest.mock import Mock, patch, MagicMock
-from datetime import datetime
-import json
+import pytest_asyncio
+from unittest.mock import Mock, patch, MagicMock, AsyncMock
 
 from control_plane.app.services.integration_service import IntegrationService
 from control_plane.app.models.integration import Integration
-from control_plane.app.models.integration_run import IntegrationRun
 from control_plane.app.schemas.integration import IntegrationCreate, IntegrationUpdate
 
 
 class TestIntegrationService:
     """Test IntegrationService class."""
 
-    @pytest.fixture
-    def mock_db(self):
-        """Fixture for mocked database session."""
-        return Mock()
+    @pytest_asyncio.fixture
+    async def mock_db(self):
+        """
+        Fixture for mocked async database session.
+
+        We use AsyncMock for the session itself (so methods like commit/execute
+        are awaitable), and regular MagicMock for the Result objects returned
+        from execute(), to match SQLAlchemy's async Session/Result behaviour:
+        - await session.execute(...) -> Result
+        - result.scalars().first() / .all() -> plain Python objects
+        """
+        db = AsyncMock()
+        return db
 
     @pytest.fixture
     def service(self, mock_db):
@@ -59,9 +66,10 @@ class TestIntegrationService:
             json_data='{"s3_bucket": "test-bucket"}',
         )
 
-    def test_create_integration(self, service, mock_db, sample_integration_create):
+    @pytest.mark.asyncio
+    async def test_create_integration(self, service, mock_db, sample_integration_create):
         """Test creating a new integration."""
-        service.create_integration(sample_integration_create)
+        await service.create_integration(sample_integration_create)
 
         mock_db.add.assert_called_once()
         mock_db.commit.assert_called_once()
@@ -72,86 +80,83 @@ class TestIntegrationService:
         assert added_integration.integration_type == "S3ToMongo"
         assert added_integration.usr_sch_status == "active"
 
-    def test_get_integration_found(self, service, mock_db, sample_integration):
+    @pytest.mark.asyncio
+    async def test_get_integration_found(self, service, mock_db, sample_integration):
         """Test getting an integration that exists."""
-        mock_query = Mock()
-        mock_filter = Mock()
-        mock_filter.first.return_value = sample_integration
+        # Simulate: result.scalars().first() -> sample_integration
+        mock_result = MagicMock()
+        scalar_result = MagicMock()
+        scalar_result.first.return_value = sample_integration
+        mock_result.scalars.return_value = scalar_result
 
-        mock_query.filter.return_value = mock_filter
-        mock_db.query.return_value = mock_query
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
-        result = service.get_integration(1)
+        result = await service.get_integration(1)
 
         assert result == sample_integration
-        mock_db.query.assert_called_once_with(Integration)
+        mock_db.execute.assert_called_once()
 
-    def test_get_integration_not_found(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_get_integration_not_found(self, service, mock_db):
         """Test getting an integration that doesn't exist."""
-        mock_query = Mock()
-        mock_filter = Mock()
-        mock_filter.first.return_value = None
+        mock_result = MagicMock()
+        scalar_result = MagicMock()
+        scalar_result.first.return_value = None
+        mock_result.scalars.return_value = scalar_result
 
-        mock_query.filter.return_value = mock_filter
-        mock_db.query.return_value = mock_query
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
-        result = service.get_integration(999)
+        result = await service.get_integration(999)
 
         assert result is None
 
-    def test_list_integrations_no_filter(self, service, mock_db, sample_integration):
+    @pytest.mark.asyncio
+    async def test_list_integrations_no_filter(self, service, mock_db, sample_integration):
         """Test listing all integrations without workspace filter."""
-        mock_query = Mock()
-        mock_offset = Mock()
-        mock_limit = Mock()
-        mock_limit.all.return_value = [sample_integration]
+        mock_result = MagicMock()
+        scalar_result = MagicMock()
+        scalar_result.all.return_value = [sample_integration]
+        mock_result.scalars.return_value = scalar_result
 
-        mock_offset.limit.return_value = mock_limit
-        mock_query.offset.return_value = mock_offset
-        mock_db.query.return_value = mock_query
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
-        results = service.list_integrations()
+        results = await service.list_integrations()
 
         assert len(results) == 1
         assert results[0] == sample_integration
-        mock_query.offset.assert_called_once_with(0)
-        mock_offset.limit.assert_called_once_with(100)
+        mock_db.execute.assert_called_once()
 
-    def test_list_integrations_with_workspace_filter(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_list_integrations_with_workspace_filter(self, service, mock_db):
         """Test listing integrations with workspace filter."""
-        mock_query = Mock()
-        mock_filter = Mock()
-        mock_offset = Mock()
-        mock_limit = Mock()
-        mock_limit.all.return_value = []
+        mock_result = MagicMock()
+        scalar_result = MagicMock()
+        scalar_result.all.return_value = []
+        mock_result.scalars.return_value = scalar_result
 
-        mock_offset.limit.return_value = mock_limit
-        mock_filter.offset.return_value = mock_offset
-        mock_query.filter.return_value = mock_filter
-        mock_db.query.return_value = mock_query
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
-        service.list_integrations(workspace_id="ws-123", skip=10, limit=50)
+        await service.list_integrations(workspace_id="ws-123", skip=10, limit=50)
 
-        mock_query.filter.assert_called_once()
-        mock_filter.offset.assert_called_once_with(10)
-        mock_offset.limit.assert_called_once_with(50)
+        mock_db.execute.assert_called_once()
 
-    def test_update_integration_success(self, service, mock_db, sample_integration):
+    @pytest.mark.asyncio
+    async def test_update_integration_success(self, service, mock_db, sample_integration):
         """Test updating an integration successfully."""
         update_data = IntegrationUpdate(
             usr_sch_status="paused",
             usr_sch_cron="0 3 * * *",
         )
 
-        # Mock get_integration
-        mock_query = Mock()
-        mock_filter = Mock()
-        mock_filter.first.return_value = sample_integration
+        # Mock get_integration -> sample_integration
+        mock_result = MagicMock()
+        scalar_result = MagicMock()
+        scalar_result.first.return_value = sample_integration
+        mock_result.scalars.return_value = scalar_result
 
-        mock_query.filter.return_value = mock_filter
-        mock_db.query.return_value = mock_query
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
-        result = service.update_integration(1, update_data)
+        result = await service.update_integration(1, update_data)
 
         assert result == sample_integration
         assert sample_integration.usr_sch_status == "paused"
@@ -159,50 +164,53 @@ class TestIntegrationService:
         mock_db.commit.assert_called_once()
         mock_db.refresh.assert_called_once()
 
-    def test_update_integration_not_found(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_update_integration_not_found(self, service, mock_db):
         """Test updating a non-existent integration."""
         update_data = IntegrationUpdate(usr_sch_status="paused")
 
         # Mock get_integration returning None
-        mock_query = Mock()
-        mock_filter = Mock()
-        mock_filter.first.return_value = None
+        mock_result = MagicMock()
+        scalar_result = MagicMock()
+        scalar_result.first.return_value = None
+        mock_result.scalars.return_value = scalar_result
 
-        mock_query.filter.return_value = mock_filter
-        mock_db.query.return_value = mock_query
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
-        result = service.update_integration(999, update_data)
+        result = await service.update_integration(999, update_data)
 
         assert result is None
         mock_db.commit.assert_not_called()
 
-    def test_delete_integration_success(self, service, mock_db, sample_integration):
+    @pytest.mark.asyncio
+    async def test_delete_integration_success(self, service, mock_db, sample_integration):
         """Test deleting an integration successfully."""
         # Mock get_integration
-        mock_query = Mock()
-        mock_filter = Mock()
-        mock_filter.first.return_value = sample_integration
+        mock_result = MagicMock()
+        scalar_result = MagicMock()
+        scalar_result.first.return_value = sample_integration
+        mock_result.scalars.return_value = scalar_result
 
-        mock_query.filter.return_value = mock_filter
-        mock_db.query.return_value = mock_query
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
-        result = service.delete_integration(1)
+        result = await service.delete_integration(1)
 
         assert result is True
         mock_db.delete.assert_called_once_with(sample_integration)
         mock_db.commit.assert_called_once()
 
-    def test_delete_integration_not_found(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_delete_integration_not_found(self, service, mock_db):
         """Test deleting a non-existent integration."""
         # Mock get_integration returning None
-        mock_query = Mock()
-        mock_filter = Mock()
-        mock_filter.first.return_value = None
+        mock_result = MagicMock()
+        scalar_result = MagicMock()
+        scalar_result.first.return_value = None
+        mock_result.scalars.return_value = scalar_result
 
-        mock_query.filter.return_value = mock_filter
-        mock_db.query.return_value = mock_query
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
-        result = service.delete_integration(999)
+        result = await service.delete_integration(999)
 
         assert result is False
         mock_db.delete.assert_not_called()
@@ -252,16 +260,17 @@ class TestIntegrationService:
 
         assert "Failed to trigger Airflow DAG" in str(exc_info.value)
 
+    @pytest.mark.asyncio
     @patch("control_plane.app.services.integration_service.requests.post")
-    def test_trigger_dag_run_success(self, mock_post, service, mock_db, sample_integration):
+    async def test_trigger_dag_run_success(self, mock_post, service, mock_db, sample_integration):
         """Test full trigger_dag_run flow."""
         # Mock get_integration
-        mock_query = Mock()
-        mock_filter = Mock()
-        mock_filter.first.return_value = sample_integration
+        mock_result = MagicMock()
+        scalar_result = MagicMock()
+        scalar_result.first.return_value = sample_integration
+        mock_result.scalars.return_value = scalar_result
 
-        mock_query.filter.return_value = mock_filter
-        mock_db.query.return_value = mock_query
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
         # Mock Airflow API response
         mock_response = Mock()
@@ -269,7 +278,7 @@ class TestIntegrationService:
         mock_response.json.return_value = {"dag_run_id": "manual__2024-01-01T00:00:00"}
         mock_post.return_value = mock_response
 
-        result = service.trigger_dag_run(1, {"override_key": "override_value"})
+        result = await service.trigger_dag_run(1, {"override_key": "override_value"})
 
         assert result["integration_id"] == 1
         assert result["dag_run_id"] == "manual__2024-01-01T00:00:00"
@@ -280,18 +289,19 @@ class TestIntegrationService:
         mock_db.add.assert_called_once()
         mock_db.commit.assert_called_once()
 
-    def test_trigger_dag_run_integration_not_found(self, service, mock_db):
+    @pytest.mark.asyncio
+    async def test_trigger_dag_run_integration_not_found(self, service, mock_db):
         """Test triggering DAG run for non-existent integration."""
         # Mock get_integration returning None
-        mock_query = Mock()
-        mock_filter = Mock()
-        mock_filter.first.return_value = None
+        mock_result = MagicMock()
+        scalar_result = MagicMock()
+        scalar_result.first.return_value = None
+        mock_result.scalars.return_value = scalar_result
 
-        mock_query.filter.return_value = mock_filter
-        mock_db.query.return_value = mock_query
+        mock_db.execute = AsyncMock(return_value=mock_result)
 
         with pytest.raises(ValueError) as exc_info:
-            service.trigger_dag_run(999)
+            await service.trigger_dag_run(999)
 
         assert "Integration 999 not found" in str(exc_info.value)
 

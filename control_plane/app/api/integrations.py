@@ -2,7 +2,7 @@
 
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.app.core.database import get_db
 from control_plane.app.services.integration_service import IntegrationService
@@ -18,16 +18,16 @@ router = APIRouter()
 
 
 @router.post("/", response_model=IntegrationResponse, status_code=201)
-def create_integration(
+async def create_integration(
     integration_data: IntegrationCreate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Create a new integration.
 
     Args:
         integration_data: Integration creation data
-        db: Database session
+        db: Async database session
 
     Returns:
         Created integration
@@ -49,16 +49,16 @@ def create_integration(
         ```
     """
     service = IntegrationService(db)
-    integration = service.create_integration(integration_data)
+    integration = await service.create_integration(integration_data)
     return integration
 
 
 @router.get("/", response_model=List[IntegrationResponse])
-def list_integrations(
+async def list_integrations(
     workspace_id: Optional[str] = Query(None, description="Filter by workspace ID"),
     skip: int = Query(0, ge=0, description="Number of records to skip"),
     limit: int = Query(100, ge=1, le=1000, description="Maximum number of records to return"),
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     List integrations with optional filtering.
@@ -67,27 +67,27 @@ def list_integrations(
         workspace_id: Optional workspace ID filter
         skip: Number of records to skip (for pagination)
         limit: Maximum number of records to return
-        db: Database session
+        db: Async database session
 
     Returns:
         List of integrations
     """
     service = IntegrationService(db)
-    integrations = service.list_integrations(workspace_id, skip, limit)
+    integrations = await service.list_integrations(workspace_id, skip, limit)
     return integrations
 
 
 @router.get("/{integration_id}", response_model=IntegrationResponse)
-def get_integration(
+async def get_integration(
     integration_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Get integration by ID.
 
     Args:
         integration_id: Integration identifier
-        db: Database session
+        db: Async database session
 
     Returns:
         Integration details
@@ -96,7 +96,7 @@ def get_integration(
         HTTPException: If integration not found
     """
     service = IntegrationService(db)
-    integration = service.get_integration(integration_id)
+    integration = await service.get_integration(integration_id)
 
     if not integration:
         raise HTTPException(status_code=404, detail=f"Integration {integration_id} not found")
@@ -105,10 +105,10 @@ def get_integration(
 
 
 @router.put("/{integration_id}", response_model=IntegrationResponse)
-def update_integration(
+async def update_integration(
     integration_id: int,
     update_data: IntegrationUpdate,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Update an existing integration.
@@ -116,7 +116,7 @@ def update_integration(
     Args:
         integration_id: Integration identifier
         update_data: Update data
-        db: Database session
+        db: Async database session
 
     Returns:
         Updated integration
@@ -125,7 +125,7 @@ def update_integration(
         HTTPException: If integration not found
     """
     service = IntegrationService(db)
-    integration = service.update_integration(integration_id, update_data)
+    integration = await service.update_integration(integration_id, update_data)
 
     if not integration:
         raise HTTPException(status_code=404, detail=f"Integration {integration_id} not found")
@@ -134,31 +134,31 @@ def update_integration(
 
 
 @router.delete("/{integration_id}", status_code=204)
-def delete_integration(
+async def delete_integration(
     integration_id: int,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Delete an integration.
 
     Args:
         integration_id: Integration identifier
-        db: Database session
+        db: Async database session
 
     Raises:
         HTTPException: If integration not found
     """
     service = IntegrationService(db)
-    deleted = service.delete_integration(integration_id)
+    deleted = await service.delete_integration(integration_id)
 
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Integration {integration_id} not found")
 
 
 @router.post("/trigger", response_model=TriggerIntegrationResponse)
-def trigger_integration(
+async def trigger_integration(
     request: TriggerIntegrationRequest,
-    db: Session = Depends(get_db),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Manually trigger an integration to run immediately.
@@ -167,7 +167,7 @@ def trigger_integration(
 
     Args:
         request: Trigger request containing integration_id and optional config
-        db: Database session
+        db: Async database session
 
     Returns:
         Trigger response with DAG run ID
@@ -188,7 +188,7 @@ def trigger_integration(
     service = IntegrationService(db)
 
     try:
-        result = service.trigger_dag_run(request.integration_id, request.execution_config)
+        result = await service.trigger_dag_run(request.integration_id, request.execution_config)
         return result
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

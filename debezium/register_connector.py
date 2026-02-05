@@ -14,11 +14,13 @@ import sys
 import json
 import time
 import argparse
+import os
 import requests
 from pathlib import Path
 
 
-KAFKA_CONNECT_URL = "http://localhost:8083"
+# Allow overriding via environment when running inside Docker
+KAFKA_CONNECT_URL = os.getenv("KAFKA_CONNECT_URL", "http://localhost:8083")
 CONNECTOR_NAME = "integration-cdc-connector"
 CONFIG_FILE = Path(__file__).parent / "integration-connector.json"
 

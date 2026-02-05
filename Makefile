@@ -38,6 +38,10 @@ clean:
 docker-up:
 	docker-compose up -d
 
+docker-up-with-connector:
+	docker-compose up -d
+	python debezium/register_connector.py --force
+
 docker-down:
 	docker-compose down
 

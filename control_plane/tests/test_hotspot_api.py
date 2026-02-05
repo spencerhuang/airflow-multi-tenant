@@ -5,19 +5,11 @@ Tests the REST API for hotspot analysis.
 """
 
 import pytest
-from fastapi.testclient import TestClient
 from datetime import datetime
 
-from control_plane.app.main import app
 from control_plane.app.models.integration import Integration
 from control_plane.app.models.workspace import Workspace
 from control_plane.app.models.customer import Customer
-
-
-@pytest.fixture
-def client():
-    """Create test client."""
-    return TestClient(app)
 
 
 @pytest.fixture

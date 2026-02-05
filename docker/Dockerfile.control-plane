@@ -12,8 +12,9 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements (control plane specific - no Airflow)
 COPY requirements-control-plane.txt .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements-control-plane.txt
+# Copy requirements and install dependencies
+COPY requirements-control-plane.txt /app/
+RUN pip install --no-cache-dir -r /app/requirements-control-plane.txt
 
 # Copy application code
 COPY control_plane /app/control_plane

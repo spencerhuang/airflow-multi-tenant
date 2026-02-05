@@ -7,16 +7,25 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from control_plane.app.core.config import settings
 from control_plane.app.core.database import engine, Base
+from control_plane.app.core.logging import setup_logging
+from control_plane.app.core.middleware import ErrorLoggingMiddleware
 from control_plane.app.api import api_router
 from control_plane.app.services.kafka_consumer_service import (
     initialize_kafka_consumer,
     shutdown_kafka_consumer,
 )
 
+# Setup logging before creating the app
+setup_logging(settings.LOG_LEVEL, settings.LOG_FORMAT)
+
 logger = logging.getLogger(__name__)
 
-# Create database tables
-Base.metadata.create_all(bind=engine)
+# Note: Database tables should be created using Alembic migrations
+# For async engines, use: asyncio.run(init_models()) in a separate script
+# Example async initialization:
+#   async def init_models():
+#       async with engine.begin() as conn:
+#           await conn.run_sync(Base.metadata.create_all)
 
 # Create FastAPI application
 app = FastAPI(
@@ -36,6 +45,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add error logging middleware
+app.add_middleware(ErrorLoggingMiddleware)
 
 # Include API router
 app.include_router(api_router, prefix=settings.API_V1_STR)

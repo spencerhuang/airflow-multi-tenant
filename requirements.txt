@@ -20,6 +20,7 @@ pydantic-settings==2.1.0
 sqlalchemy==1.4.53
 alembic==1.13.1
 pymysql==1.1.0
+greenlet==3.0.3
 cryptography==42.0.2
 
 # AWS

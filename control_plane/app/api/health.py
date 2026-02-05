@@ -1,7 +1,8 @@
 """Health check endpoints."""
 
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import text
 
 from control_plane.app.core.database import get_db
 from control_plane.app.core.config import settings
@@ -10,7 +11,7 @@ router = APIRouter()
 
 
 @router.get("/health")
-def health_check():
+async def health_check():
     """
     Health check endpoint.
 
@@ -25,19 +26,19 @@ def health_check():
 
 
 @router.get("/health/db")
-def database_health_check(db: Session = Depends(get_db)):
+async def database_health_check(db: AsyncSession = Depends(get_db)):
     """
     Database health check endpoint.
 
     Args:
-        db: Database session
+        db: Async database session
 
     Returns:
         Database connection status
     """
     try:
         # Execute a simple query to check database connectivity
-        db.execute("SELECT 1")
+        await db.execute(text("SELECT 1"))
         return {
             "status": "healthy",
             "database": "connected",

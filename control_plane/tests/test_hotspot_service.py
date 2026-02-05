@@ -123,13 +123,14 @@ def sample_integrations(db_session: Session):
 class TestHotspotService:
     """Tests for HotspotService."""
 
-    def test_analyze_hotspots_basic(self, db_session, sample_integrations):
+    @pytest.mark.asyncio
+    async def test_analyze_hotspots_basic(self, async_db_session, sample_integrations):
         """Test basic hotspot analysis."""
         start_date = datetime(2026, 2, 3, 0, 0, 0)  # Monday, Feb 3, 2026
         days = 7
 
-        result = HotspotService.analyze_hotspots(
-            db=db_session,
+        result = await HotspotService.analyze_hotspots(
+            db=async_db_session,
             start_date=start_date,
             days=days,
             hotspot_threshold=100,
@@ -150,7 +151,8 @@ class TestHotspotService:
         # Verify we have hourly forecast for all hours
         assert len(result["hourly_forecast"]) == days * 24  # 7 days * 24 hours
 
-    def test_monday_first_of_month_convergence(self, db_session, sample_integrations):
+    @pytest.mark.asyncio
+    async def test_monday_first_of_month_convergence(self, async_db_session, sample_integrations):
         """
         Test the worst case: Monday + First of Month.
 
@@ -161,8 +163,8 @@ class TestHotspotService:
         start_date = datetime(2026, 6, 1, 0, 0, 0)  # Monday, June 1, 2026
         days = 2
 
-        result = HotspotService.analyze_hotspots(
-            db=db_session,
+        result = await HotspotService.analyze_hotspots(
+            db=async_db_session,
             start_date=start_date,
             days=days,
             hotspot_threshold=100,
@@ -192,13 +194,14 @@ class TestHotspotService:
         assert any("jitter" in s.lower() for s in convergence_hotspot["mitigation_suggestions"])
         assert any("stagger" in s.lower() or "KEDA" in s for s in convergence_hotspot["mitigation_suggestions"])
 
-    def test_statistics_calculation(self, db_session, sample_integrations):
+    @pytest.mark.asyncio
+    async def test_statistics_calculation(self, async_db_session, sample_integrations):
         """Test that statistics are calculated correctly."""
         start_date = datetime(2026, 2, 3, 0, 0, 0)
         days = 7
 
-        result = HotspotService.analyze_hotspots(
-            db=db_session,
+        result = await HotspotService.analyze_hotspots(
+            db=async_db_session,
             start_date=start_date,
             days=days,
             hotspot_threshold=100,
