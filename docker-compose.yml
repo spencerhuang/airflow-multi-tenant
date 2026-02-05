@@ -204,7 +204,7 @@ services:
       KAFKA_CONNECT_URL: http://kafka-connect:8083
     volumes:
       - .:/app
-    entrypoint: ["python", "debezium/register_connector.py", "--force"]
+    entrypoint: [ "python", "debezium/register_connector.py", "--force" ]
     restart: "on-failure"
 
   # Airflow Webserver
@@ -277,6 +277,10 @@ services:
       context: .
       dockerfile: docker/Dockerfile.control-plane
     container_name: control-plane-service
+    command: >
+      sh -c "cd control_plane && 
+             python -m alembic upgrade head && 
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     environment:
       DATABASE_URL: mysql+aiomysql://control_plane:control_plane@mysql:3306/control_plane
       AIRFLOW_API_URL: http://airflow-webserver:8080/api/v1

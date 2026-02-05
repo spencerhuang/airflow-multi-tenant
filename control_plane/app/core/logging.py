@@ -78,6 +78,13 @@ def setup_logging(log_level: str = "INFO", log_format: str = "json") -> None:
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
     
-    # Reduce noise from third-party libraries
+    # Reduce noise from third-party libraries but ensure they use our handler/formatter
+    for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+        logger = logging.getLogger(logger_name)
+        logger.handlers = []  # Clear default uvicorn handlers
+        logger.addHandler(console_handler)  # Use our JSON-enabled handler
+        logger.propagate = False  # Prevent double logging
+    
+    # Set levels
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.error").setLevel(logging.INFO)

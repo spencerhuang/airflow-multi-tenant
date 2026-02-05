@@ -137,12 +137,13 @@ Go to http://localhost:8080 and check the `s3_to_mongo_ondemand` DAG.
 
 ### Control Plane Database Schema
 
-The control plane uses MySQL. Tables are created automatically on first run.
+The control plane uses MySQL. Tables are managed via Alembic migrations.
 
-To manually create tables:
+To create tables and seed initial data:
 
 ```bash
-docker-compose exec control-plane python -c "from control_plane.app.core.database import engine, Base; Base.metadata.create_all(bind=engine)"
+# Run migrations (creates tables)
+docker-compose exec control-plane python -m alembic upgrade head
 ```
 
 ### Seed Initial Data

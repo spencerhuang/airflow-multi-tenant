@@ -498,65 +498,79 @@ class KafkaConsumerService:
         Args:
             data: Integration event data with workflow configuration
         """
+        import asyncio
         import json as json_module
         from control_plane.app.services.integration_service import IntegrationService
         from control_plane.app.models.integration import Integration
         from control_plane.app.core.database import get_db
+        from sqlalchemy import select
 
         integration_id = data.get("integration_id")
         logger.info(f"Triggering workflow for integration {integration_id}")
 
-        # Get database session
-        db = next(get_db())
-        try:
-            service = IntegrationService(db)
+        async def _run_async_logic():
+            # Get database session from async generator
+            async for db in get_db():
+                try:
+                    service = IntegrationService(db)
 
-            # Extract execution config based on event type
-            execution_config = {}
-
-            if data.get("is_debezium_event"):
-                # For Debezium events, query database to get integration json_data
-                logger.info(f"Processing Debezium CDC event - querying database for integration {integration_id}")
-
-                integration = db.query(Integration).filter(
-                    Integration.integration_id == integration_id
-                ).first()
-
-                if not integration:
-                    logger.error(f"Integration {integration_id} not found in database")
-                    return
-
-                # Parse json_data to get execution config
-                if integration.json_data:
-                    try:
-                        execution_config = json_module.loads(integration.json_data)
-                        logger.info(
-                            f"Extracted execution config from database: {list(execution_config.keys())}"
-                        )
-                    except json_module.JSONDecodeError as e:
-                        logger.error(f"Failed to parse json_data for integration {integration_id}: {e}")
-                        execution_config = {}
-                else:
-                    logger.warning(f"Integration {integration_id} has no json_data")
+                    # Extract execution config based on event type
                     execution_config = {}
 
-            else:
-                # For legacy events, extract from event data
-                if data.get("source_config"):
-                    execution_config.update(data["source_config"])
-                if data.get("destination_config"):
-                    execution_config.update(data["destination_config"])
+                    if data.get("is_debezium_event"):
+                        # For Debezium events, query database to get integration json_data
+                        logger.info(f"Processing Debezium CDC event - querying database for integration {integration_id}")
 
-            # Trigger the integration DAG run
-            result = service.trigger_dag_run(
-                integration_id=integration_id,
-                execution_config=execution_config if execution_config else None
-            )
+                        # Use execute(select(...)) for async query
+                        result = await db.execute(
+                            select(Integration).where(Integration.integration_id == integration_id)
+                        )
+                        integration = result.scalars().first()
 
-            logger.info(
-                f"✓ Workflow triggered successfully for integration {integration_id}",
-                extra={"dag_run_id": result.get("dag_run_id")},
-            )
+                        if not integration:
+                            logger.error(f"Integration {integration_id} not found in database")
+                            return
+
+                        # Parse json_data to get execution config
+                        if integration.json_data:
+                            try:
+                                execution_config = json_module.loads(integration.json_data)
+                                logger.info(
+                                    f"Extracted execution config from database: {list(execution_config.keys())}"
+                                )
+                            except json_module.JSONDecodeError as e:
+                                logger.error(f"Failed to parse json_data for integration {integration_id}: {e}")
+                                execution_config = {}
+                        else:
+                            logger.warning(f"Integration {integration_id} has no json_data")
+                            execution_config = {}
+
+                    else:
+                        # For legacy events, extract from event data
+                        if data.get("source_config"):
+                            execution_config.update(data["source_config"])
+                        if data.get("destination_config"):
+                            execution_config.update(data["destination_config"])
+
+                    # Trigger the integration DAG run (await the async method)
+                    result = await service.trigger_dag_run(
+                        integration_id=integration_id,
+                        execution_config=execution_config if execution_config else None
+                    )
+
+                    logger.info(
+                        f"✓ Workflow triggered successfully for integration {integration_id}",
+                        extra={"dag_run_id": result.get("dag_run_id")},
+                    )
+                finally:
+                    # Session is automatically closed by async context manager
+                    pass
+                
+                # We only need one session
+                break
+
+        try:
+            asyncio.run(_run_async_logic())
         except Exception as e:
             logger.error(
                 f"Error triggering workflow: {e}",
@@ -564,8 +578,6 @@ class KafkaConsumerService:
                 extra={"integration_id": integration_id},
             )
             raise
-        finally:
-            db.close()
 
 
 # Global consumer service instance

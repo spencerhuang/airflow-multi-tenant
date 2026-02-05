@@ -6,9 +6,8 @@ from typing import AsyncGenerator
 
 from control_plane.app.core.config import settings
 
-# Convert DATABASE_URL to use async driver
-# Replace mysql+pymysql:// with mysql+aiomysql:// for async support
-async_database_url = settings.DATABASE_URL.replace('mysql+pymysql://', 'mysql+aiomysql://')
+# DATABASE_URL is already configured with mysql+aiomysql:// in config.py
+async_database_url = settings.DATABASE_URL
 
 # Create async database engine
 engine = create_async_engine(

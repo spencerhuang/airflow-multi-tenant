@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
 
     # Database
-    DATABASE_URL: str = "mysql+pymysql://root:root@localhost:3306/control_plane"
+    DATABASE_URL: str = "mysql+aiomysql://control_plane:control_plane@localhost:3306/control_plane"
 
     # Airflow
     AIRFLOW_API_URL: str = "http://localhost:8080/api/v1"
