@@ -119,6 +119,8 @@ Reusable modules wrapping data source APIs:
 - Implementation of 24 static dags per workflow, only completed 1 static dag for demostration
 - k8s deployment not verified
 - Busy-Time Mitigation in section 9.3 was not implemented
+- Future start_date planner dag for all tenants and all workflow, basically a daily chron job to see which integrations will need weekly or monthly dag_run for tomorrow.
+- Future start_date dag (for weekly and monthly) per workflow. Will use DateTimeSensor with mode="reschedule"
 
 ## License
 
