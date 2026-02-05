@@ -69,18 +69,18 @@ docker-compose up -d
 - Control Plane API: http://localhost:8000
 - API Documentation: http://localhost:8000/docs
 
-![Docker local](docs/Screenshot 2026-02-04 at 10.56.10 AM.png)
+![Docker local](docs/Screenshot2026-02-04at10.56.10AM.png)
 
 ### Running Tests
 
 [TESTING.md](TESTING.md)
 [E2E_TEST_GUIDE.md](E2E_TEST_GUIDE.md)
 
-![Test in local](docs/Screenshot 2026-02-04 at 8.47.22 AM.png)
+![Test in local](docs/Screenshot2026-02-04at8.47.22AM.png)
 
-![Test in local e2e](docs/Screenshot 2026-02-04 at 10.51.29 AM.png)
+![Test in local e2e](docs/Screenshot2026-02-04at10.51.29AM.png)
 
-![Test in local e2e](docs/Screenshot 2026-02-04 at 10.50.41 AM.png)
+![Test in local e2e](docs/Screenshot2026-02-04at10.50.41AM.png)
 
 ## Key Components
 
