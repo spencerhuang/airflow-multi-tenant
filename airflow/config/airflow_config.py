@@ -146,6 +146,9 @@ class ControlPlaneConfig:
     control_plane_api_url: str
     control_plane_api_timeout_seconds: int
 
+    # Control plane database (sync driver for direct Airflow-to-MySQL access)
+    control_plane_db_url: str
+
     # Backfill settings
     max_backfill_days: int
     max_backfill_runs_per_integration: int
@@ -163,6 +166,7 @@ class ControlPlaneConfig:
         Environment variables:
             CONTROL_PLANE_API_URL (default: http://control-plane:8000)
             CONTROL_PLANE_API_TIMEOUT_SECONDS (default: 30)
+            CONTROL_PLANE_DB_URL (default: mysql+pymysql://control_plane:control_plane@mysql:3306/control_plane)
             AIRFLOW_MAX_BACKFILL_DAYS (default: 7)
             AIRFLOW_MAX_BACKFILL_RUNS_PER_INTEGRATION (default: 7)
             AIRFLOW_BACKFILL_BATCH_SIZE (default: 10)
@@ -178,6 +182,10 @@ class ControlPlaneConfig:
             ),
             control_plane_api_timeout_seconds=int(
                 os.getenv("CONTROL_PLANE_API_TIMEOUT_SECONDS", "30")
+            ),
+            control_plane_db_url=os.getenv(
+                "CONTROL_PLANE_DB_URL",
+                "mysql+pymysql://control_plane:control_plane@mysql:3306/control_plane",
             ),
             max_backfill_days=int(os.getenv("AIRFLOW_MAX_BACKFILL_DAYS", "7")),
             max_backfill_runs_per_integration=int(

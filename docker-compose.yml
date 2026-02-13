@@ -12,7 +12,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__SECRET_KEY: 'airflow-secret-key-change-in-production'
     AIRFLOW__CORE__ENABLE_XCOM_PICKLING: 'true'
     PYTHONPATH: /opt/airflow
-    _PIP_ADDITIONAL_REQUIREMENTS: 'boto3 pymongo'
+    _PIP_ADDITIONAL_REQUIREMENTS: 'boto3 pymongo pymysql'
+    CONTROL_PLANE_DB_URL: 'mysql+pymysql://control_plane:control_plane@mysql:3306/control_plane'
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/plugins:/opt/airflow/plugins

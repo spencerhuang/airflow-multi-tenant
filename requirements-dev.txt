@@ -20,3 +20,4 @@ python-dotenv==1.0.1
 minio
 boto3
 pymongo
+aiomysql

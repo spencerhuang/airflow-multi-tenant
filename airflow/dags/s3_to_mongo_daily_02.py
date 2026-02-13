@@ -11,6 +11,7 @@ Configuration:
 
 from datetime import datetime
 from airflow import DAG
+from airflow.utils.trigger_rule import TriggerRule
 
 # Import operators from plugins directory (Airflow automatically adds plugins to path)
 from operators.s3_to_mongo_operators import (
@@ -74,12 +75,14 @@ with DAG(
         """,
     )
 
-    # Task 4: Cleanup
+    # Task 4: Cleanup (runs even if upstream tasks fail)
     cleanup = CleanUpS3ToMongoTask(
         task_id="cleanup",
+        trigger_rule=TriggerRule.ALL_DONE,
         doc_md="""
         ### Cleanup Task
-        Closes connections and updates integration run status.
+        Clears sensitive XCom data and updates integration run status.
+        Runs even if upstream tasks fail (ALL_DONE trigger rule).
         """,
     )
 
