@@ -205,7 +205,7 @@ services:
       KAFKA_CONNECT_URL: http://kafka-connect:8083
     volumes:
       - .:/app
-    entrypoint: [ "python", "debezium/register_connector.py", "--force" ]
+    entrypoint: [ "sh", "-c", "pip install requests -q && python debezium/register_connector.py --force" ]
     restart: "on-failure"
 
   # Airflow Webserver

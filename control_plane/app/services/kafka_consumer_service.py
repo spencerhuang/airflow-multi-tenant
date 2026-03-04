@@ -99,12 +99,15 @@ class KafkaConsumerService:
         self.running = False
         self.thread: Optional[threading.Thread] = None
 
-        # Initialize DLQ producer if enabled
-        if self.enable_dlq:
-            self._init_dlq_producer()
+        # DLQ producer is lazily initialized when first needed,
+        # because Kafka may not be ready at control plane startup time.
 
-    def _init_dlq_producer(self):
-        """Initialize Dead Letter Queue producer."""
+    def _get_dlq_producer(self) -> Optional[KafkaProducer]:
+        """Get or lazily initialize the DLQ producer."""
+        if self.dlq_producer is not None:
+            return self.dlq_producer
+        if not self.enable_dlq:
+            return None
         try:
             self.dlq_producer = KafkaProducer(
                 bootstrap_servers=[self.bootstrap_servers],
@@ -115,6 +118,7 @@ class KafkaConsumerService:
         except Exception as e:
             logger.error(f"Failed to initialize DLQ producer: {e}")
             self.dlq_producer = None
+        return self.dlq_producer
 
     def _send_to_dlq(self, message: dict, error: Exception, retry_count: int):
         """
@@ -125,7 +129,8 @@ class KafkaConsumerService:
             error: Exception that caused the failure
             retry_count: Number of retry attempts
         """
-        if not self.enable_dlq or not self.dlq_producer:
+        producer = self._get_dlq_producer()
+        if not self.enable_dlq or not producer:
             logger.warning("DLQ not enabled or producer not initialized")
             return
 
@@ -150,7 +155,7 @@ class KafkaConsumerService:
             message_key = str(integration_id if integration_id else "unknown")
 
             # Send to DLQ
-            future = self.dlq_producer.send(
+            future = producer.send(
                 self.dlq_topic,
                 key=message_key,
                 value=dlq_message
@@ -211,17 +216,32 @@ class KafkaConsumerService:
     def _consume_loop(self) -> None:
         """Main consumer loop running in background thread."""
         try:
-            # Initialize Kafka consumer
-            # Disable auto-commit when DLQ is enabled so we can control when to commit offsets
-            self.consumer = KafkaConsumer(
-                self.topic,
-                bootstrap_servers=[self.bootstrap_servers],
-                group_id=self.group_id,
-                auto_offset_reset="earliest",
-                enable_auto_commit=not self.enable_dlq,  # Manual commit for DLQ
-                value_deserializer=lambda m: json.loads(m.decode("utf-8")) if m is not None else None,
-                consumer_timeout_ms=1000,  # 1 second timeout for graceful shutdown
-            )
+            # Initialize Kafka consumer with retry on broker unavailability.
+            # Kafka may not be ready when the control plane starts, so we
+            # retry up to 30 times (60 seconds total) before giving up.
+            max_connect_retries = 30
+            for attempt in range(1, max_connect_retries + 1):
+                if not self.running:
+                    return
+                try:
+                    self.consumer = KafkaConsumer(
+                        self.topic,
+                        bootstrap_servers=[self.bootstrap_servers],
+                        group_id=self.group_id,
+                        auto_offset_reset="earliest",
+                        enable_auto_commit=not self.enable_dlq,
+                        value_deserializer=lambda m: json.loads(m.decode("utf-8")) if m is not None else None,
+                        consumer_timeout_ms=1000,
+                    )
+                    break
+                except KafkaError as e:
+                    if attempt < max_connect_retries:
+                        logger.warning(
+                            f"Kafka not ready (attempt {attempt}/{max_connect_retries}): {e}"
+                        )
+                        time.sleep(2)
+                    else:
+                        raise
 
             logger.info(f"Kafka consumer connected to {self.bootstrap_servers}")
             logger.info(f"Subscribed to topic: {self.topic}")
@@ -495,82 +515,168 @@ class KafkaConsumerService:
         """
         Trigger Airflow DAG for integration.
 
+        Uses sync SQLAlchemy (pymysql) and sync requests to avoid asyncio
+        event loop conflicts — this method runs in the Kafka consumer's
+        background thread, which has no event loop.
+
         Args:
             data: Integration event data with workflow configuration
         """
-        import asyncio
         import json as json_module
-        from control_plane.app.services.integration_service import IntegrationService
-        from control_plane.app.models.integration import Integration
-        from control_plane.app.core.database import get_db
-        from sqlalchemy import select
+        from sqlalchemy import create_engine, text
 
         integration_id = data.get("integration_id")
         logger.info(f"Triggering workflow for integration {integration_id}")
 
-        async def _run_async_logic():
-            # Get database session from async generator
-            async for db in get_db():
-                try:
-                    service = IntegrationService(db)
-
-                    # Extract execution config based on event type
-                    execution_config = {}
-
-                    if data.get("is_debezium_event"):
-                        # For Debezium events, query database to get integration json_data
-                        logger.info(f"Processing Debezium CDC event - querying database for integration {integration_id}")
-
-                        # Use execute(select(...)) for async query
-                        result = await db.execute(
-                            select(Integration).where(Integration.integration_id == integration_id)
-                        )
-                        integration = result.scalars().first()
-
-                        if not integration:
-                            logger.error(f"Integration {integration_id} not found in database")
-                            return
-
-                        # Parse json_data to get execution config
-                        if integration.json_data:
-                            try:
-                                execution_config = json_module.loads(integration.json_data)
-                                logger.info(
-                                    f"Extracted execution config from database: {list(execution_config.keys())}"
-                                )
-                            except json_module.JSONDecodeError as e:
-                                logger.error(f"Failed to parse json_data for integration {integration_id}: {e}")
-                                execution_config = {}
-                        else:
-                            logger.warning(f"Integration {integration_id} has no json_data")
-                            execution_config = {}
-
-                    else:
-                        # For legacy events, extract from event data
-                        if data.get("source_config"):
-                            execution_config.update(data["source_config"])
-                        if data.get("destination_config"):
-                            execution_config.update(data["destination_config"])
-
-                    # Trigger the integration DAG run (await the async method)
-                    result = await service.trigger_dag_run(
-                        integration_id=integration_id,
-                        execution_config=execution_config if execution_config else None
-                    )
-
-                    logger.info(
-                        f"✓ Workflow triggered successfully for integration {integration_id}",
-                        extra={"dag_run_id": result.get("dag_run_id")},
-                    )
-                finally:
-                    # Session is automatically closed by async context manager
-                    pass
-                
-                # We only need one session
-                break
-
         try:
-            asyncio.run(_run_async_logic())
+            # Build sync DATABASE_URL (replace aiomysql with pymysql)
+            sync_db_url = settings.DATABASE_URL.replace(
+                "mysql+aiomysql://", "mysql+pymysql://"
+            )
+            engine = create_engine(sync_db_url)
+
+            # --- Step 1: Query integration from DB ---
+            execution_config = {}
+
+            if data.get("is_debezium_event"):
+                logger.info(
+                    f"Processing Debezium CDC event - querying database for integration {integration_id}"
+                )
+                with engine.connect() as conn:
+                    row = conn.execute(
+                        text(
+                            "SELECT integration_id, workspace_id, workflow_id, auth_id, "
+                            "source_access_pt_id, dest_access_pt_id, integration_type, "
+                            "usr_sch_cron, utc_sch_cron, schedule_type, json_data "
+                            "FROM integrations WHERE integration_id = :iid"
+                        ),
+                        {"iid": integration_id},
+                    ).fetchone()
+
+                if not row:
+                    logger.error(f"Integration {integration_id} not found in database")
+                    return
+
+                # Parse json_data for execution config
+                json_data = row.json_data  # type: ignore[union-attr]
+                if json_data:
+                    try:
+                        execution_config = json_module.loads(json_data)
+                        logger.info(
+                            f"Extracted execution config from database: {list(execution_config.keys())}"
+                        )
+                    except json_module.JSONDecodeError as e:
+                        logger.error(
+                            f"Failed to parse json_data for integration {integration_id}: {e}"
+                        )
+                else:
+                    logger.warning(f"Integration {integration_id} has no json_data")
+
+            else:
+                # Legacy events carry config inline
+                if data.get("source_config"):
+                    execution_config.update(data["source_config"])
+                if data.get("destination_config"):
+                    execution_config.update(data["destination_config"])
+                # Still need to fetch the row for DAG ID construction
+                with engine.connect() as conn:
+                    row = conn.execute(
+                        text(
+                            "SELECT integration_id, workspace_id, workflow_id, auth_id, "
+                            "source_access_pt_id, dest_access_pt_id, integration_type, "
+                            "usr_sch_cron, utc_sch_cron, schedule_type, json_data "
+                            "FROM integrations WHERE integration_id = :iid"
+                        ),
+                        {"iid": integration_id},
+                    ).fetchone()
+
+                if not row:
+                    logger.error(f"Integration {integration_id} not found in database")
+                    return
+
+            # --- Step 2: Determine DAG ID ---
+            integration_type = row.integration_type  # type: ignore[union-attr]
+            schedule_type = row.schedule_type  # type: ignore[union-attr]
+            utc_sch_cron = row.utc_sch_cron  # type: ignore[union-attr]
+            workspace_id = row.workspace_id  # type: ignore[union-attr]
+
+            workflow_name = integration_type.lower().replace("to", "_to_")
+
+            if schedule_type == "daily" and utc_sch_cron:
+                try:
+                    cron_parts = utc_sch_cron.split()
+                    if len(cron_parts) >= 2:
+                        hour = cron_parts[1].zfill(2)
+                        dag_id = f"{workflow_name}_daily_{hour}"
+                    else:
+                        dag_id = f"{workflow_name}_ondemand"
+                except (IndexError, ValueError):
+                    dag_id = f"{workflow_name}_ondemand"
+            else:
+                dag_id = f"{workflow_name}_ondemand"
+
+            # --- Step 3: Build DAG run conf ---
+            conf = {
+                "tenant_id": workspace_id,
+                "integration_id": integration_id,
+                "integration_type": integration_type,
+                "auth_id": row.auth_id,  # type: ignore[union-attr]
+                "source_access_pt_id": row.source_access_pt_id,  # type: ignore[union-attr]
+                "dest_access_pt_id": row.dest_access_pt_id,  # type: ignore[union-attr]
+            }
+            # Merge json_data config
+            if row.json_data:  # type: ignore[union-attr]
+                try:
+                    conf.update(json_module.loads(row.json_data))  # type: ignore[union-attr]
+                except json_module.JSONDecodeError:
+                    pass
+            # Override with execution_config
+            if execution_config:
+                conf.update(execution_config)
+
+            # --- Step 4: Trigger Airflow DAG via REST API ---
+            import requests
+            from requests.auth import HTTPBasicAuth
+            from datetime import datetime
+
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")[:17]
+            tenant_id = conf.get("tenant_id", "unknown")
+            custom_run_id = f"{tenant_id}_{dag_id}_manual_{timestamp}"
+
+            payload = {
+                "dag_run_id": custom_run_id,
+                "conf": conf,
+            }
+
+            url = f"{settings.AIRFLOW_API_URL}/dags/{dag_id}/dagRuns"
+            response = requests.post(
+                url,
+                json=payload,
+                auth=HTTPBasicAuth(settings.AIRFLOW_USERNAME, settings.AIRFLOW_PASSWORD),
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            dag_run_id = response.json().get("dag_run_id")
+
+            # --- Step 5: Record IntegrationRun in DB ---
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO integration_runs "
+                        "(integration_id, dag_run_id, execution_date, started) "
+                        "VALUES (:iid, :drid, NOW(), NOW())"
+                    ),
+                    {"iid": integration_id, "drid": dag_run_id},
+                )
+
+            engine.dispose()
+
+            logger.info(
+                f"Workflow triggered successfully for integration {integration_id}",
+                extra={"dag_run_id": dag_run_id, "dag_id": dag_id},
+            )
+
         except Exception as e:
             logger.error(
                 f"Error triggering workflow: {e}",
