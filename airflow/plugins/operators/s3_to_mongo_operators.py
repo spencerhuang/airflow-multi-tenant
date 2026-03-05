@@ -7,7 +7,7 @@ from datetime import datetime
 
 from airflow.models import BaseOperator, XCom
 from airflow.utils.decorators import apply_defaults
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select
 
 # Use relative import within plugins directory
 from operators.base_operators import PrepareTask, ValidateTask, CleanUpTask
@@ -18,6 +18,12 @@ from connectors.s3.client import S3Client
 from connectors.s3.reader import S3Reader
 from connectors.mongo.auth import MongoAuth
 from connectors.mongo.client import MongoClient
+
+# Shared Core table definitions for the control-plane database
+from models.control_plane_tables import (
+    integration_runs as integration_runs_table,
+    integration_run_errors as integration_run_errors_table,
+)
 
 
 class PrepareS3ToMongoTask(PrepareTask):
@@ -466,12 +472,9 @@ class CleanUpS3ToMongoTask(CleanUpTask):
             with engine.connect() as conn:
                 # Find the IntegrationRun record by dag_run_id
                 result = conn.execute(
-                    text(
-                        "SELECT run_id FROM integration_runs "
-                        "WHERE dag_run_id = :dag_run_id "
-                        "LIMIT 1"
-                    ),
-                    {"dag_run_id": dag_run_id},
+                    select(integration_runs_table.c.run_id)
+                    .where(integration_runs_table.c.dag_run_id == dag_run_id)
+                    .limit(1)
                 )
                 row = result.fetchone()
 
@@ -487,33 +490,24 @@ class CleanUpS3ToMongoTask(CleanUpTask):
 
                 # Update IntegrationRun with final status
                 conn.execute(
-                    text(
-                        "UPDATE integration_runs "
-                        "SET ended = :ended, is_success = :is_success "
-                        "WHERE run_id = :run_id"
-                    ),
-                    {
-                        "ended": datetime.utcnow(),
-                        "is_success": is_success,
-                        "run_id": run_id,
-                    },
+                    integration_runs_table.update()
+                    .where(integration_runs_table.c.run_id == run_id)
+                    .values(
+                        ended=datetime.utcnow(),
+                        is_success=is_success,
+                    )
                 )
 
                 # Insert error records
                 for error in upstream_errors:
                     conn.execute(
-                        text(
-                            "INSERT INTO integration_run_errors "
-                            "(run_id, error_code, message, task_id, timestamp) "
-                            "VALUES (:run_id, :error_code, :message, :task_id, :timestamp)"
-                        ),
-                        {
-                            "run_id": run_id,
-                            "error_code": error["error_code"],
-                            "message": str(error["message"])[:2000],
-                            "task_id": error["task_id"],
-                            "timestamp": datetime.utcnow(),
-                        },
+                        integration_run_errors_table.insert().values(
+                            run_id=run_id,
+                            error_code=error["error_code"],
+                            message=str(error["message"])[:2000],
+                            task_id=error["task_id"],
+                            timestamp=datetime.utcnow(),
+                        )
                     )
 
                 conn.commit()

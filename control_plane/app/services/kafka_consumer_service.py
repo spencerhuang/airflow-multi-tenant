@@ -515,7 +515,7 @@ class KafkaConsumerService:
         """
         Trigger Airflow DAG for integration.
 
-        Uses sync SQLAlchemy (pymysql) and sync requests to avoid asyncio
+        Uses sync SQLAlchemy Core (pymysql) and sync requests to avoid asyncio
         event loop conflicts — this method runs in the Kafka consumer's
         background thread, which has no event loop.
 
@@ -523,7 +523,9 @@ class KafkaConsumerService:
             data: Integration event data with workflow configuration
         """
         import json as json_module
-        from sqlalchemy import create_engine, text
+        from sqlalchemy import create_engine, select, func
+        from control_plane.app.models.integration import Integration
+        from control_plane.app.models.integration_run import IntegrationRun
 
         integration_id = data.get("integration_id")
         logger.info(f"Triggering workflow for integration {integration_id}")
@@ -535,30 +537,44 @@ class KafkaConsumerService:
             )
             engine = create_engine(sync_db_url)
 
-            # --- Step 1: Query integration from DB ---
+            # --- Step 1: Build execution_config from event data ---
             execution_config = {}
+            if not data.get("is_debezium_event"):
+                # Legacy events carry config inline
+                if data.get("source_config"):
+                    execution_config.update(data["source_config"])
+                if data.get("destination_config"):
+                    execution_config.update(data["destination_config"])
 
+            # --- Step 2: Query integration from DB (both paths need this) ---
+            integrations_t = Integration.__table__
+            with engine.connect() as conn:
+                row = conn.execute(
+                    select(
+                        integrations_t.c.integration_id,
+                        integrations_t.c.workspace_id,
+                        integrations_t.c.workflow_id,
+                        integrations_t.c.auth_id,
+                        integrations_t.c.source_access_pt_id,
+                        integrations_t.c.dest_access_pt_id,
+                        integrations_t.c.integration_type,
+                        integrations_t.c.usr_sch_cron,
+                        integrations_t.c.utc_sch_cron,
+                        integrations_t.c.schedule_type,
+                        integrations_t.c.json_data,
+                    ).where(integrations_t.c.integration_id == integration_id)
+                ).fetchone()
+
+            if not row:
+                logger.error(f"Integration {integration_id} not found in database")
+                return
+
+            # For Debezium events, extract execution_config from json_data
             if data.get("is_debezium_event"):
                 logger.info(
                     f"Processing Debezium CDC event - querying database for integration {integration_id}"
                 )
-                with engine.connect() as conn:
-                    row = conn.execute(
-                        text(
-                            "SELECT integration_id, workspace_id, workflow_id, auth_id, "
-                            "source_access_pt_id, dest_access_pt_id, integration_type, "
-                            "usr_sch_cron, utc_sch_cron, schedule_type, json_data "
-                            "FROM integrations WHERE integration_id = :iid"
-                        ),
-                        {"iid": integration_id},
-                    ).fetchone()
-
-                if not row:
-                    logger.error(f"Integration {integration_id} not found in database")
-                    return
-
-                # Parse json_data for execution config
-                json_data = row.json_data  # type: ignore[union-attr]
+                json_data = row.json_data
                 if json_data:
                     try:
                         execution_config = json_module.loads(json_data)
@@ -572,33 +588,11 @@ class KafkaConsumerService:
                 else:
                     logger.warning(f"Integration {integration_id} has no json_data")
 
-            else:
-                # Legacy events carry config inline
-                if data.get("source_config"):
-                    execution_config.update(data["source_config"])
-                if data.get("destination_config"):
-                    execution_config.update(data["destination_config"])
-                # Still need to fetch the row for DAG ID construction
-                with engine.connect() as conn:
-                    row = conn.execute(
-                        text(
-                            "SELECT integration_id, workspace_id, workflow_id, auth_id, "
-                            "source_access_pt_id, dest_access_pt_id, integration_type, "
-                            "usr_sch_cron, utc_sch_cron, schedule_type, json_data "
-                            "FROM integrations WHERE integration_id = :iid"
-                        ),
-                        {"iid": integration_id},
-                    ).fetchone()
-
-                if not row:
-                    logger.error(f"Integration {integration_id} not found in database")
-                    return
-
-            # --- Step 2: Determine DAG ID ---
-            integration_type = row.integration_type  # type: ignore[union-attr]
-            schedule_type = row.schedule_type  # type: ignore[union-attr]
-            utc_sch_cron = row.utc_sch_cron  # type: ignore[union-attr]
-            workspace_id = row.workspace_id  # type: ignore[union-attr]
+            # --- Step 3: Determine DAG ID ---
+            integration_type = row.integration_type
+            schedule_type = row.schedule_type
+            utc_sch_cron = row.utc_sch_cron
+            workspace_id = row.workspace_id
 
             workflow_name = integration_type.lower().replace("to", "_to_")
 
@@ -615,26 +609,26 @@ class KafkaConsumerService:
             else:
                 dag_id = f"{workflow_name}_ondemand"
 
-            # --- Step 3: Build DAG run conf ---
+            # --- Step 4: Build DAG run conf ---
             conf = {
                 "tenant_id": workspace_id,
                 "integration_id": integration_id,
                 "integration_type": integration_type,
-                "auth_id": row.auth_id,  # type: ignore[union-attr]
-                "source_access_pt_id": row.source_access_pt_id,  # type: ignore[union-attr]
-                "dest_access_pt_id": row.dest_access_pt_id,  # type: ignore[union-attr]
+                "auth_id": row.auth_id,
+                "source_access_pt_id": row.source_access_pt_id,
+                "dest_access_pt_id": row.dest_access_pt_id,
             }
             # Merge json_data config
-            if row.json_data:  # type: ignore[union-attr]
+            if row.json_data:
                 try:
-                    conf.update(json_module.loads(row.json_data))  # type: ignore[union-attr]
+                    conf.update(json_module.loads(row.json_data))
                 except json_module.JSONDecodeError:
                     pass
             # Override with execution_config
             if execution_config:
                 conf.update(execution_config)
 
-            # --- Step 4: Trigger Airflow DAG via REST API ---
+            # --- Step 5: Trigger Airflow DAG via REST API ---
             import requests
             from requests.auth import HTTPBasicAuth
             from datetime import datetime
@@ -659,15 +653,16 @@ class KafkaConsumerService:
             response.raise_for_status()
             dag_run_id = response.json().get("dag_run_id")
 
-            # --- Step 5: Record IntegrationRun in DB ---
+            # --- Step 6: Record IntegrationRun in DB ---
+            integration_runs_t = IntegrationRun.__table__
             with engine.begin() as conn:
                 conn.execute(
-                    text(
-                        "INSERT INTO integration_runs "
-                        "(integration_id, dag_run_id, execution_date, started) "
-                        "VALUES (:iid, :drid, NOW(), NOW())"
-                    ),
-                    {"iid": integration_id, "drid": dag_run_id},
+                    integration_runs_t.insert().values(
+                        integration_id=integration_id,
+                        dag_run_id=dag_run_id,
+                        execution_date=func.now(),
+                        started=func.now(),
+                    )
                 )
 
             engine.dispose()
