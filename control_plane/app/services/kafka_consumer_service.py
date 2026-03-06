@@ -526,6 +526,7 @@ class KafkaConsumerService:
         from sqlalchemy import create_engine, select, func
         from control_plane.app.models.integration import Integration
         from control_plane.app.models.integration_run import IntegrationRun
+        from control_plane.app.models.auth import Auth
 
         integration_id = data.get("integration_id")
         logger.info(f"Triggering workflow for integration {integration_id}")
@@ -618,12 +619,32 @@ class KafkaConsumerService:
                 "source_access_pt_id": row.source_access_pt_id,
                 "dest_access_pt_id": row.dest_access_pt_id,
             }
-            # Merge json_data config
+            # Merge json_data config (non-sensitive workflow config)
             if row.json_data:
                 try:
                     conf.update(json_module.loads(row.json_data))
                 except json_module.JSONDecodeError:
                     pass
+
+            # Resolve credentials from workspace's Auth records
+            auths_t = Auth.__table__
+            with engine.connect() as conn:
+                auth_rows = conn.execute(
+                    select(auths_t.c.auth_type, auths_t.c.json_data)
+                    .where(auths_t.c.workspace_id == workspace_id)
+                ).fetchall()
+            for auth_row in auth_rows:
+                if auth_row.json_data:
+                    try:
+                        conf.update(json_module.loads(auth_row.json_data))
+                    except json_module.JSONDecodeError:
+                        logger.warning(
+                            f"Failed to parse auth json_data for workspace {workspace_id}"
+                        )
+            logger.info(
+                f"Resolved {len(auth_rows)} auth record(s) for workspace {workspace_id}"
+            )
+
             # Override with execution_config
             if execution_config:
                 conf.update(execution_config)

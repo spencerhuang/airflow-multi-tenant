@@ -12,6 +12,7 @@ from requests.auth import HTTPBasicAuth
 
 from control_plane.app.models.integration import Integration
 from control_plane.app.models.integration_run import IntegrationRun
+from control_plane.app.models.auth import Auth
 from control_plane.app.schemas.integration import IntegrationCreate, IntegrationUpdate
 from control_plane.app.core.config import settings
 from control_plane.app.core.retry import DB_RETRY, DB_TIMEOUT
@@ -372,13 +373,24 @@ class IntegrationService:
                 "dest_access_pt_id": integration.dest_access_pt_id,
             }
 
-            # Merge integration json_data
+            # Merge integration json_data (non-sensitive workflow config)
             if integration.json_data:
                 try:
                     json_config = json.loads(integration.json_data)
                     conf.update(json_config)
                 except json.JSONDecodeError:
                     pass
+
+            # Resolve credentials from workspace's Auth records
+            auth_result = await self.db.execute(
+                select(Auth).where(Auth.workspace_id == integration.workspace_id)
+            )
+            for auth in auth_result.scalars().all():
+                if auth.json_data:
+                    try:
+                        conf.update(json.loads(auth.json_data))
+                    except json.JSONDecodeError:
+                        pass
 
             # Override with execution_config if provided
             if execution_config:

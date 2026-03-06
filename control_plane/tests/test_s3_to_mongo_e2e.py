@@ -204,22 +204,24 @@ def setup_database(wait_for_services):
     db = SessionLocal()
 
     try:
-        # Clean up existing test data (delete in correct order to respect foreign key constraints)
-        from control_plane.app.models.integration import Integration
-        from control_plane.app.models.integration_run import IntegrationRun
-
-        # Delete integration_runs first (child table)
-        test_integrations = db.query(Integration).filter(Integration.workspace_id.like("test-e2e-%")).all()
-        test_integration_ids = [i.integration_id for i in test_integrations]
-        if test_integration_ids:
-            db.query(IntegrationRun).filter(IntegrationRun.integration_id.in_(test_integration_ids)).delete(synchronize_session=False)
-
-        # Now delete integrations and related tables (parent tables)
-        db.query(Integration).filter(Integration.workspace_id.like("test-e2e-%")).delete(synchronize_session=False)
-        db.query(Auth).filter(Auth.workspace_id.like("test-e2e-%")).delete(synchronize_session=False)
-        db.query(Workspace).filter(Workspace.workspace_id.like("test-e2e-%")).delete(synchronize_session=False)
-        db.query(Customer).filter(Customer.customer_guid.like("test-e2e-%")).delete(synchronize_session=False)
-        db.commit()
+        # Clean up existing test data using raw SQL to avoid ORM session/FK issues
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text(
+                "DELETE ire FROM integration_run_errors ire "
+                "JOIN integration_runs ir ON ire.run_id = ir.run_id "
+                "JOIN integrations i ON ir.integration_id = i.integration_id "
+                "WHERE i.workspace_id LIKE 'test-e2e-%'"
+            ))
+            conn.execute(text(
+                "DELETE ir FROM integration_runs ir "
+                "JOIN integrations i ON ir.integration_id = i.integration_id "
+                "WHERE i.workspace_id LIKE 'test-e2e-%'"
+            ))
+            conn.execute(text("DELETE FROM integrations WHERE workspace_id LIKE 'test-e2e-%'"))
+            conn.execute(text("DELETE FROM auths WHERE workspace_id LIKE 'test-e2e-%'"))
+            conn.execute(text("DELETE FROM workspaces WHERE workspace_id LIKE 'test-e2e-%'"))
+            conn.execute(text("DELETE FROM customers WHERE customer_guid LIKE 'test-e2e-%'"))
 
         # Create test data
         customer = Customer(customer_guid="test-e2e-cust", name="E2E Test Customer", max_integration=100)
@@ -228,16 +230,28 @@ def setup_database(wait_for_services):
         workspace = Workspace(workspace_id="test-e2e-ws", customer_guid="test-e2e-cust")
         db.add(workspace)
 
-        auth = Auth(
+        # S3 credentials (source)
+        s3_auth = Auth(
             workspace_id="test-e2e-ws",
             auth_type="aws_iam",
             json_data=json.dumps({
-                "aws_access_key_id": MINIO_ACCESS_KEY,
-                "aws_secret_access_key": MINIO_SECRET_KEY,
-                "endpoint_url": f"http://minio:9000",  # Docker internal
+                "s3_endpoint_url": "http://minio:9000",  # Docker internal
+                "s3_access_key": MINIO_ACCESS_KEY,
+                "s3_secret_key": MINIO_SECRET_KEY,
             }),
         )
-        db.add(auth)
+        db.add(s3_auth)
+
+        # MongoDB credentials (destination)
+        mongo_auth = Auth(
+            workspace_id="test-e2e-ws",
+            auth_type="mongodb",
+            json_data=json.dumps({
+                "mongo_uri": "mongodb://root:root@mongodb:27017/",
+                "mongo_database": "test_database",
+            }),
+        )
+        db.add(mongo_auth)
 
         # Get or create workflow
         workflow = db.query(Workflow).filter(Workflow.workflow_id == 1).first()
@@ -258,33 +272,36 @@ def setup_database(wait_for_services):
 
         db.commit()
 
-        auth_id = auth.auth_id
+        auth_id = s3_auth.auth_id
 
         yield {"workspace_id": "test-e2e-ws", "auth_id": auth_id}
 
     finally:
-        # Cleanup (delete in correct order to respect foreign key constraints)
-        from control_plane.app.models.integration import Integration
-        from control_plane.app.models.integration_run import IntegrationRun
+        # Cleanup using a fresh connection to avoid ORM session state issues
         try:
-            # Delete integration_runs first (child table)
-            test_integrations = db.query(Integration).filter(Integration.workspace_id.like("test-e2e-%")).all()
-            test_integration_ids = [i.integration_id for i in test_integrations]
-            if test_integration_ids:
-                db.query(IntegrationRun).filter(IntegrationRun.integration_id.in_(test_integration_ids)).delete(synchronize_session=False)
-
-            # Now delete integrations (parent table)
-            db.query(Integration).filter(Integration.workspace_id.like("test-e2e-%")).delete(synchronize_session=False)
-            db.query(Auth).filter(Auth.workspace_id.like("test-e2e-%")).delete(synchronize_session=False)
-            db.query(Workspace).filter(Workspace.workspace_id.like("test-e2e-%")).delete(synchronize_session=False)
-            db.query(Customer).filter(Customer.customer_guid.like("test-e2e-%")).delete(synchronize_session=False)
-            db.commit()
+            db.close()
+            with engine.begin() as conn:
+                from sqlalchemy import text
+                # Delete in FK order: errors → runs → integrations → auth → workspace → customer
+                conn.execute(text(
+                    "DELETE ire FROM integration_run_errors ire "
+                    "JOIN integration_runs ir ON ire.run_id = ir.run_id "
+                    "JOIN integrations i ON ir.integration_id = i.integration_id "
+                    "WHERE i.workspace_id LIKE 'test-e2e-%'"
+                ))
+                conn.execute(text(
+                    "DELETE ir FROM integration_runs ir "
+                    "JOIN integrations i ON ir.integration_id = i.integration_id "
+                    "WHERE i.workspace_id LIKE 'test-e2e-%'"
+                ))
+                conn.execute(text("DELETE FROM integrations WHERE workspace_id LIKE 'test-e2e-%'"))
+                conn.execute(text("DELETE FROM auths WHERE workspace_id LIKE 'test-e2e-%'"))
+                conn.execute(text("DELETE FROM workspaces WHERE workspace_id LIKE 'test-e2e-%'"))
+                conn.execute(text("DELETE FROM customers WHERE customer_guid LIKE 'test-e2e-%'"))
             print("✓ Cleanup completed successfully")
         except Exception as e:
             print(f"Cleanup error: {e}")
-            db.rollback()
         finally:
-            db.close()
             engine.dispose()
 
 
@@ -363,12 +380,7 @@ class TestS3ToMongoEndToEnd:
             "json_data": json.dumps({
                 "s3_bucket": TEST_BUCKET,
                 "s3_prefix": TEST_PREFIX,
-                "s3_endpoint_url": "http://minio:9000",  # Docker internal
-                "s3_access_key": MINIO_ACCESS_KEY,
-                "s3_secret_key": MINIO_SECRET_KEY,
                 "mongo_collection": TEST_COLLECTION,
-                "mongo_uri": "mongodb://root:root@mongodb:27017/",
-                "mongo_database": "test_database",
             }),
         }
 
