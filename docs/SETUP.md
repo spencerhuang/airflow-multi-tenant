@@ -21,6 +21,12 @@ This will:
 - Create a `.env` file from `.env.example`
 - Install Python dependencies
 
+Install the shared packages (required for local development):
+
+```bash
+pip install -e packages/shared_models -e packages/shared_utils
+```
+
 ### 2. Start All Services
 
 ```bash

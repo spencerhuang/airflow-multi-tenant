@@ -20,7 +20,7 @@ from connectors.mongo.auth import MongoAuth
 from connectors.mongo.client import MongoClient
 
 # Shared Core table definitions for the control-plane database
-from models.control_plane_tables import (
+from shared_models.tables import (
     integration_runs as integration_runs_table,
     integration_run_errors as integration_run_errors_table,
 )

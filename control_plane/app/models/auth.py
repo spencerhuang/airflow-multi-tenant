@@ -1,9 +1,9 @@
 """Auth model representing authentication credentials."""
 
-from sqlalchemy import Column, String, Integer, ForeignKey, Text
 from sqlalchemy.orm import relationship
 
 from control_plane.app.core.database import Base
+from shared_models.tables import auths as auths_table
 
 
 class Auth(Base):
@@ -22,12 +22,7 @@ class Auth(Base):
         integrations: One-to-many relationship with Integration
     """
 
-    __tablename__ = "auths"
-
-    auth_id = Column(Integer, primary_key=True, autoincrement=True)
-    workspace_id = Column(String(36), ForeignKey("workspaces.workspace_id"), nullable=False)
-    auth_type = Column(String(50), nullable=False)
-    json_data = Column(Text, nullable=False)  # Encrypted JSON
+    __table__ = auths_table
 
     # Relationships
     workspace = relationship("Workspace", back_populates="auths")

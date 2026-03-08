@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shared-models"
+version = "0.1.0"
+description = "Shared SQLAlchemy Core table definitions for airflow-multi-tenant"
+requires-python = ">=3.11"
+dependencies = [
+    "sqlalchemy>=1.4,<3",
+]
+
+[tool.setuptools.packages.find]
+include = ["shared_models*"]

@@ -1,4 +1,4 @@
-"""Re-export TimezoneConverter from shared_utils for backwards compatibility."""
+"""Shared utilities for airflow-multi-tenant."""
 
 from shared_utils.timezone import TimezoneConverter
 

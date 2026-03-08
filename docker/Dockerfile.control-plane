@@ -16,6 +16,10 @@ COPY requirements-control-plane.txt .
 COPY requirements-control-plane.txt /app/
 RUN pip install --no-cache-dir -r /app/requirements-control-plane.txt
 
+# Copy shared packages (single source of truth for models and utilities)
+COPY packages/shared_models/shared_models /app/shared_models
+COPY packages/shared_utils/shared_utils /app/shared_utils
+
 # Copy application code
 COPY control_plane /app/control_plane
 COPY connectors /app/connectors

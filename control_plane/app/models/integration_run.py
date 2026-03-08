@@ -1,10 +1,12 @@
 """IntegrationRun and IntegrationRunError models for tracking execution history."""
 
-from sqlalchemy import Column, String, Integer, ForeignKey, DateTime, Boolean, Text
 from sqlalchemy.orm import relationship
-from datetime import datetime
 
 from control_plane.app.core.database import Base
+from shared_models.tables import (
+    integration_runs as integration_runs_table,
+    integration_run_errors as integration_run_errors_table,
+)
 
 
 class IntegrationRun(Base):
@@ -26,15 +28,7 @@ class IntegrationRun(Base):
         errors: One-to-many relationship with IntegrationRunError
     """
 
-    __tablename__ = "integration_runs"
-
-    run_id = Column(Integer, primary_key=True, autoincrement=True)
-    integration_id = Column(Integer, ForeignKey("integrations.integration_id"), nullable=False, index=True)
-    dag_run_id = Column(String(255), index=True)
-    started = Column(DateTime, default=datetime.utcnow)
-    ended = Column(DateTime)
-    is_success = Column(Boolean, default=False)
-    execution_date = Column(DateTime)
+    __table__ = integration_runs_table
 
     # Relationships
     integration = relationship("Integration", back_populates="integration_runs")
@@ -58,14 +52,7 @@ class IntegrationRunError(Base):
         integration_run: Many-to-one relationship with IntegrationRun
     """
 
-    __tablename__ = "integration_run_errors"
-
-    error_id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(Integer, ForeignKey("integration_runs.run_id"), nullable=False, index=True)
-    error_code = Column(String(100))
-    message = Column(Text)
-    task_id = Column(String(255))
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
+    __table__ = integration_run_errors_table
 
     # Relationships
     integration_run = relationship("IntegrationRun", back_populates="errors")

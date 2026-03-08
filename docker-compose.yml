@@ -19,6 +19,8 @@ x-airflow-common: &airflow-common
     - ./airflow/plugins:/opt/airflow/plugins
     - ./airflow/config:/opt/airflow/config
     - ./connectors:/opt/airflow/connectors
+    - ./packages/shared_models/shared_models:/opt/airflow/shared_models
+    - ./packages/shared_utils/shared_utils:/opt/airflow/shared_utils
     - airflow-logs:/opt/airflow/logs
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends-on
@@ -299,6 +301,8 @@ services:
     volumes:
       - ./control_plane:/app/control_plane
       - ./connectors:/app/connectors
+      - ./packages/shared_models/shared_models:/app/shared_models
+      - ./packages/shared_utils/shared_utils:/app/shared_utils
 
 volumes:
   mysql-data:

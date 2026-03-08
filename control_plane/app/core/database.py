@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.ext.declarative import declarative_base
 from typing import AsyncGenerator
 
+from shared_models.tables import metadata as shared_metadata
 from control_plane.app.core.config import settings
 
 # DATABASE_URL is already configured with mysql+aiomysql:// in config.py
@@ -25,8 +26,8 @@ AsyncSessionLocal = async_sessionmaker(
     expire_on_commit=False,
 )
 
-# Create base class for models
-Base = declarative_base()
+# Create base class for models using shared metadata so Alembic sees all tables
+Base = declarative_base(metadata=shared_metadata)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

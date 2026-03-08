@@ -21,3 +21,7 @@ minio
 boto3
 pymongo
 aiomysql
+
+# Shared packages (editable installs from packages/)
+-e packages/shared_models
+-e packages/shared_utils

@@ -27,10 +27,13 @@ Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Control Plane Service
 
 ```
 .
+├── packages/               # Shared pip-installable packages
+│   ├── shared_models/     # SQLAlchemy Core table definitions (single source of truth)
+│   └── shared_utils/      # Shared utilities (TimezoneConverter, etc.)
 ├── control_plane/          # FastAPI control plane service
 │   ├── app/
 │   │   ├── api/           # REST API endpoints
-│   │   ├── models/        # SQLAlchemy models
+│   │   ├── models/        # SQLAlchemy ORM models (use __table__ from shared_models)
 │   │   ├── schemas/       # Pydantic schemas
 │   │   ├── services/      # Business logic
 │   │   └── core/          # Configuration
@@ -59,12 +62,17 @@ Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Control Plane Service
 
 ### Local Development
 
-1. Start the local stack:
+1. Install shared packages:
+```bash
+pip install -e packages/shared_models -e packages/shared_utils
+```
+
+2. Start the local stack:
 ```bash
 docker-compose up -d
 ```
 
-2. Access services:
+3. Access services:
 - Airflow UI: http://localhost:8080
 - Control Plane API: http://localhost:8000
 - API Documentation: http://localhost:8000/docs

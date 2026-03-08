@@ -1,9 +1,9 @@
 """Workspace model representing a workspace within a customer."""
 
-from sqlalchemy import Column, String, ForeignKey
 from sqlalchemy.orm import relationship
 
 from control_plane.app.core.database import Base
+from shared_models.tables import workspaces as workspaces_table
 
 
 class Workspace(Base):
@@ -17,10 +17,7 @@ class Workspace(Base):
         auths: One-to-many relationship with Auth
     """
 
-    __tablename__ = "workspaces"
-
-    workspace_id = Column(String(36), primary_key=True, index=True)
-    customer_guid = Column(String(36), ForeignKey("customers.customer_guid"), nullable=False)
+    __table__ = workspaces_table
 
     # Relationships
     customer = relationship("Customer", back_populates="workspaces")
