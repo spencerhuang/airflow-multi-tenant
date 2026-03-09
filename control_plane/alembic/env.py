@@ -12,7 +12,16 @@ import sys
 import os
 
 # Add the project root to sys.path (parent of control_plane directory)
-sys.path.append(os.path.dirname(os.getcwd()))
+project_root = os.path.dirname(os.getcwd())
+sys.path.append(project_root)
+
+# Add shared packages to sys.path so shared_models/shared_utils are importable
+# even without pip install -e (e.g. inside Docker where PYTHONPATH handles it,
+# or when running alembic directly from the control_plane directory).
+for pkg in ("shared_models", "shared_utils"):
+    pkg_path = os.path.join(project_root, "packages", pkg)
+    if os.path.isdir(pkg_path) and pkg_path not in sys.path:
+        sys.path.append(pkg_path)
 
 from control_plane.app.core.config import settings
 from control_plane.app.core.database import Base
