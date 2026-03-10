@@ -155,6 +155,11 @@ class ControlPlaneConfig:
     backfill_batch_size: int
     backfill_batch_delay_seconds: int
 
+    # Airflow internal API (for self-triggering DAGs from within tasks)
+    airflow_internal_api_url: str
+    airflow_username: str
+    airflow_password: str
+
     # DST settings
     default_timezone: str
 
@@ -167,6 +172,9 @@ class ControlPlaneConfig:
             CONTROL_PLANE_API_URL (default: http://control-plane:8000)
             CONTROL_PLANE_API_TIMEOUT_SECONDS (default: 30)
             CONTROL_PLANE_DB_URL (default: mysql+pymysql://control_plane:control_plane@mysql:3306/control_plane)
+            AIRFLOW_INTERNAL_API_URL (default: http://airflow-apiserver:8080/api/v2)
+            AIRFLOW_USERNAME (default: airflow)
+            AIRFLOW_PASSWORD (default: airflow)
             AIRFLOW_MAX_BACKFILL_DAYS (default: 7)
             AIRFLOW_MAX_BACKFILL_RUNS_PER_INTEGRATION (default: 7)
             AIRFLOW_BACKFILL_BATCH_SIZE (default: 10)
@@ -187,6 +195,12 @@ class ControlPlaneConfig:
                 "CONTROL_PLANE_DB_URL",
                 "mysql+pymysql://control_plane:control_plane@mysql:3306/control_plane",
             ),
+            airflow_internal_api_url=os.getenv(
+                "AIRFLOW_INTERNAL_API_URL",
+                "http://airflow-apiserver:8080/api/v2",
+            ),
+            airflow_username=os.getenv("AIRFLOW_USERNAME", "airflow"),
+            airflow_password=os.getenv("AIRFLOW_PASSWORD", "airflow"),
             max_backfill_days=int(os.getenv("AIRFLOW_MAX_BACKFILL_DAYS", "7")),
             max_backfill_runs_per_integration=int(
                 os.getenv("AIRFLOW_MAX_BACKFILL_RUNS_PER_INTEGRATION", "7")

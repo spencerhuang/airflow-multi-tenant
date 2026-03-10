@@ -112,7 +112,7 @@ Reusable modules wrapping data source APIs:
 
 ### Airflow DAGs
 
-- **Daily Scheduled DAGs**: Pre-created DAGs for each hour (00-23) per workflow
+- **Daily Scheduled DAGs**: [Dispatcher pattern](docs/DISPATCHER_PATTERN.md) — scheduled DAGs query the control plane DB for due integrations and trigger the ondemand DAG for each one. Each integration gets an isolated DAG run with full conf and IntegrationRun tracking.
 - **On-Demand DAG**: Triggered via API for CDC, manual replays, and backfills
 
 ## Testing Strategy
@@ -124,7 +124,7 @@ Reusable modules wrapping data source APIs:
 
 ## TODO
 
-- Implementation of 24 static dags per workflow, only completed 1 static dag for demostration
+- Create remaining hourly dispatcher DAGs (daily_00 through daily_23) per workflow — only daily_02 exists as a working example
 - k8s deployment not verified
 - Busy-Time Mitigation in section 9.3 was not implemented
 - Future start_date planner dag for all tenants and all workflows, basically a daily chron job to see which integrations will need weekly or monthly dag_run for tomorrow.
