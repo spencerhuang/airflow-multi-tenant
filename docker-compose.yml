@@ -10,6 +10,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     # Airflow 3: FAB auth manager replaces legacy auth backends
     AIRFLOW__CORE__AUTH_MANAGER: 'airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager'
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
     AIRFLOW__WEBSERVER__SECRET_KEY: 'airflow-secret-key-change-in-production'
     AIRFLOW__API__SECRET_KEY: 'airflow-secret-key-change-in-production'
     AIRFLOW__CORE__INTERNAL_API_SECRET_KEY: 'airflow-internal-api-secret-key'
