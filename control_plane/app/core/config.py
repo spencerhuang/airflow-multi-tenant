@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "mysql+aiomysql://control_plane:control_plane@localhost:3306/control_plane"
 
     # Airflow
-    AIRFLOW_API_URL: str = "http://localhost:8080/api/v1"
+    AIRFLOW_API_URL: str = "http://localhost:8080/api/v2"
     AIRFLOW_USERNAME: str = "airflow"
     AIRFLOW_PASSWORD: str = "airflow"
 

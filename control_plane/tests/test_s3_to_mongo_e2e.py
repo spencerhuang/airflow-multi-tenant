@@ -68,6 +68,15 @@ MONGO_PORT = 27017
 DATABASE_URL = "mysql+pymysql://control_plane:control_plane@localhost:3306/control_plane"
 KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
 KAFKA_TOPIC = "cdc.integration.events"
+AIRFLOW_API_URL = "http://localhost:8080/api/v2"
+AIRFLOW_USERNAME = "airflow"
+AIRFLOW_PASSWORD = "airflow"
+
+from shared_utils import get_airflow_auth_headers as _get_airflow_auth_headers
+
+
+def get_airflow_auth_headers():
+    return _get_airflow_auth_headers(AIRFLOW_API_URL, AIRFLOW_USERNAME, AIRFLOW_PASSWORD)
 
 # Test data
 TEST_BUCKET = "test-s3-to-mongo"
@@ -421,17 +430,16 @@ class TestS3ToMongoEndToEnd:
         time.sleep(15)  # Give consumer time to process CDC event and trigger DAG
 
         # Check if DAG was triggered by the CDC event
-        airflow_api_url = "http://localhost:8080/api/v1"
         dag_id = "s3_to_mongo_ondemand"
-        auth = ("airflow", "airflow")
 
         print(f"\n  Checking Airflow for DAG runs created after {trigger_time.isoformat()}...")
         # Filter DAG runs to only those created in the last 30 seconds
         min_start_time = (trigger_time - timedelta(seconds=10)).isoformat() + "Z"
-        list_url = f"{airflow_api_url}/dags/{dag_id}/dagRuns?start_date_gte={min_start_time}&order_by=-start_date"
+        list_url = f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns?start_date_gte={min_start_time}&order_by=-start_date"
 
         try:
-            response = requests.get(list_url, auth=auth, timeout=10)
+            headers = get_airflow_auth_headers()
+            response = requests.get(list_url, headers=headers, timeout=10)
 
             if response.status_code == 200:
                 dag_runs = response.json().get("dag_runs", [])
@@ -475,9 +483,7 @@ class TestS3ToMongoEndToEnd:
             pytest.skip("DAG was not triggered successfully in test_04")
 
         # Wait for DAG to complete
-        airflow_api_url = "http://localhost:8080/api/v1"
         dag_id = "s3_to_mongo_ondemand"
-        auth = ("airflow", "airflow")
 
         print(f"  Waiting for DAG run {dag_run_id} to complete...")
 
@@ -489,8 +495,9 @@ class TestS3ToMongoEndToEnd:
         while elapsed < max_wait:
             try:
                 # Check DAG run status
-                status_url = f"{airflow_api_url}/dags/{dag_id}/dagRuns/{dag_run_id}"
-                response = requests.get(status_url, auth=auth, timeout=10)
+                headers = get_airflow_auth_headers()
+                status_url = f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns/{dag_run_id}"
+                response = requests.get(status_url, headers=headers, timeout=10)
 
                 if response.status_code == 200:
                     dag_run_info = response.json()

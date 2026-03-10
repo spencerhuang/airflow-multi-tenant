@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import json
 import requests
-from requests.auth import HTTPBasicAuth
+from shared_utils import get_airflow_auth_headers
 
 from control_plane.app.models.integration import Integration
 from control_plane.app.models.integration_run import IntegrationRun
@@ -501,15 +501,18 @@ class IntegrationService:
 
         payload = {
             "dag_run_id": custom_run_id,
+            "logical_date": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "conf": conf,
         }
 
         try:
+            headers = get_airflow_auth_headers(
+                settings.AIRFLOW_API_URL, settings.AIRFLOW_USERNAME, settings.AIRFLOW_PASSWORD
+            )
             response = requests.post(
                 url,
                 json=payload,
-                auth=HTTPBasicAuth(settings.AIRFLOW_USERNAME, settings.AIRFLOW_PASSWORD),
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 timeout=10,
             )
             response.raise_for_status()

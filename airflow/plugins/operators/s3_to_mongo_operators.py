@@ -5,8 +5,8 @@ import os
 from typing import Dict, Any, List
 from datetime import datetime
 
-from airflow.models import BaseOperator, XCom
-from airflow.utils.decorators import apply_defaults
+from airflow.sdk import BaseOperator
+from airflow.models import XCom
 from sqlalchemy import create_engine, select
 
 # Use relative import within plugins directory
@@ -35,11 +35,6 @@ class PrepareS3ToMongoTask(PrepareTask):
     - MongoDB connection details
     - IAM role or credentials
     """
-
-    @apply_defaults
-    def __init__(self, *args, **kwargs):
-        """Initialize S3 to MongoDB prepare task."""
-        super().__init__(*args, **kwargs)
 
     def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -102,11 +97,6 @@ class ValidateS3ToMongoTask(ValidateTask):
     - S3 objects exist
     - MongoDB connection is accessible
     """
-
-    @apply_defaults
-    def __init__(self, *args, **kwargs):
-        """Initialize S3 to MongoDB validate task."""
-        super().__init__(*args, **kwargs)
 
     def execute(self, context: Dict[str, Any]) -> bool:
         """
@@ -199,11 +189,6 @@ class ExecuteS3ToMongoTask(BaseOperator):
     - Transforms data if needed
     - Writes data to MongoDB
     """
-
-    @apply_defaults
-    def __init__(self, *args, **kwargs):
-        """Initialize S3 to MongoDB execute task."""
-        super().__init__(*args, **kwargs)
 
     def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -369,11 +354,6 @@ class CleanUpS3ToMongoTask(CleanUpTask):
     2. Clears sensitive credential data from XCom
     3. Updates IntegrationRun status in control plane database
     """
-
-    @apply_defaults
-    def __init__(self, *args, **kwargs):
-        """Initialize S3 to MongoDB cleanup task."""
-        super().__init__(*args, **kwargs)
 
     def execute(self, context: Dict[str, Any]) -> None:
         """

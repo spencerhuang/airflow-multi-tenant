@@ -16,7 +16,11 @@ from datetime import datetime
 # Mock Airflow modules so operators can be imported without Airflow installed
 # ---------------------------------------------------------------------------
 def _setup_airflow_mocks():
-    """Create mock Airflow modules and inject them into sys.modules."""
+    """Create mock Airflow modules and inject them into sys.modules.
+
+    Airflow 3.0 moved BaseOperator, DAG, TriggerRule to airflow.sdk.
+    XCom remains in airflow.models.
+    """
     # Create a real-looking BaseOperator mock class
     class MockBaseOperator:
         def __init__(self, *args, **kwargs):
@@ -36,40 +40,33 @@ def _setup_airflow_mocks():
         run_id = "run_id"
         key = "key"
 
-    # apply_defaults is a no-op decorator in modern Airflow
-    def apply_defaults(func):
-        return func
-
-    # Build mock module tree
-    airflow_mod = ModuleType("airflow")
-    airflow_models = ModuleType("airflow.models")
-    airflow_utils = ModuleType("airflow.utils")
-    airflow_utils_decorators = ModuleType("airflow.utils.decorators")
-    airflow_utils_trigger_rule = ModuleType("airflow.utils.trigger_rule")
-
-    airflow_models.BaseOperator = MockBaseOperator
-    airflow_models.XCom = MockXCom
-    airflow_utils_decorators.apply_defaults = apply_defaults
-
     # TriggerRule enum mock
     class TriggerRule:
         ALL_SUCCESS = "all_success"
         ALL_DONE = "all_done"
 
-    airflow_utils_trigger_rule.TriggerRule = TriggerRule
+    # Build mock module tree
+    airflow_mod = ModuleType("airflow")
+    airflow_sdk = ModuleType("airflow.sdk")
+    airflow_models = ModuleType("airflow.models")
+
+    # Airflow 3: BaseOperator and TriggerRule live in airflow.sdk
+    airflow_sdk.BaseOperator = MockBaseOperator
+    airflow_sdk.TriggerRule = TriggerRule
+
+    # XCom remains in airflow.models
+    airflow_models.XCom = MockXCom
 
     sys.modules["airflow"] = airflow_mod
+    sys.modules["airflow.sdk"] = airflow_sdk
     sys.modules["airflow.models"] = airflow_models
-    sys.modules["airflow.utils"] = airflow_utils
-    sys.modules["airflow.utils.decorators"] = airflow_utils_decorators
-    sys.modules["airflow.utils.trigger_rule"] = airflow_utils_trigger_rule
 
     return MockXCom
 
 
 # Check if real Airflow is available; if not, use mocks
 try:
-    from airflow.models import BaseOperator  # noqa: F401
+    from airflow.sdk import BaseOperator  # noqa: F401
     _MockXCom = None
 except (ImportError, ModuleNotFoundError):
     _MockXCom = _setup_airflow_mocks()

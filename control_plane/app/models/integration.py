@@ -33,19 +33,25 @@ class Integration(Base):
         workspace: Many-to-one relationship with Workspace
         workflow: Many-to-one relationship with Workflow
         auth: Many-to-one relationship with Auth
+        source_access_point: Many-to-one relationship with AccessPoint (source)
+        dest_access_point: Many-to-one relationship with AccessPoint (destination)
         integration_runs: One-to-many relationship with IntegrationRun
     """
 
     __table__ = integrations_table
 
     # Relationships
-    workspace = relationship("Workspace")
+    workspace = relationship("Workspace", back_populates="integrations")
     workflow = relationship("Workflow", back_populates="integrations")
     auth = relationship("Auth", back_populates="integrations")
     source_access_point = relationship(
-        "AccessPoint", foreign_keys=[integrations_table.c.source_access_pt_id]
+        "AccessPoint",
+        foreign_keys=[integrations_table.c.source_access_pt_id],
+        back_populates="source_integrations",
     )
     dest_access_point = relationship(
-        "AccessPoint", foreign_keys=[integrations_table.c.dest_access_pt_id]
+        "AccessPoint",
+        foreign_keys=[integrations_table.c.dest_access_pt_id],
+        back_populates="dest_integrations",
     )
     integration_runs = relationship("IntegrationRun", back_populates="integration", cascade="all, delete-orphan")

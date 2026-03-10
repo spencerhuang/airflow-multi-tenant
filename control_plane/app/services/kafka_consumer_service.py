@@ -651,7 +651,6 @@ class KafkaConsumerService:
 
             # --- Step 5: Trigger Airflow DAG via REST API ---
             import requests
-            from requests.auth import HTTPBasicAuth
             from datetime import datetime
 
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")[:17]
@@ -660,15 +659,20 @@ class KafkaConsumerService:
 
             payload = {
                 "dag_run_id": custom_run_id,
+                "logical_date": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "conf": conf,
             }
+
+            from shared_utils import get_airflow_auth_headers
+            headers = get_airflow_auth_headers(
+                settings.AIRFLOW_API_URL, settings.AIRFLOW_USERNAME, settings.AIRFLOW_PASSWORD
+            )
 
             url = f"{settings.AIRFLOW_API_URL}/dags/{dag_id}/dagRuns"
             response = requests.post(
                 url,
                 json=payload,
-                auth=HTTPBasicAuth(settings.AIRFLOW_USERNAME, settings.AIRFLOW_PASSWORD),
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 timeout=10,
             )
             response.raise_for_status()

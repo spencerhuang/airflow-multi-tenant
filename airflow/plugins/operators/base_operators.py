@@ -1,8 +1,7 @@
 """Base abstract operators for workflow tasks."""
 
 from abc import ABC, abstractmethod
-from airflow.models import BaseOperator
-from airflow.utils.decorators import apply_defaults
+from airflow.sdk import BaseOperator
 from typing import Dict, Any
 
 
@@ -18,15 +17,7 @@ class PrepareTask(BaseOperator, ABC):
     Subclasses must implement execute() method with workflow-specific logic.
     """
 
-    @apply_defaults
     def __init__(self, *args, **kwargs):
-        """
-        Initialize prepare task.
-
-        Args:
-            *args: Positional arguments passed to BaseOperator
-            **kwargs: Keyword arguments passed to BaseOperator
-        """
         super().__init__(*args, **kwargs)
 
     @abstractmethod
@@ -58,15 +49,7 @@ class ValidateTask(BaseOperator, ABC):
     Subclasses must implement execute() method with workflow-specific logic.
     """
 
-    @apply_defaults
     def __init__(self, *args, **kwargs):
-        """
-        Initialize validate task.
-
-        Args:
-            *args: Positional arguments passed to BaseOperator
-            **kwargs: Keyword arguments passed to BaseOperator
-        """
         super().__init__(*args, **kwargs)
 
     @abstractmethod
@@ -98,15 +81,7 @@ class CleanUpTask(BaseOperator, ABC):
     Subclasses must implement execute() method with workflow-specific logic.
     """
 
-    @apply_defaults
     def __init__(self, *args, **kwargs):
-        """
-        Initialize cleanup task.
-
-        Args:
-            *args: Positional arguments passed to BaseOperator
-            **kwargs: Keyword arguments passed to BaseOperator
-        """
         super().__init__(*args, **kwargs)
 
     @abstractmethod

@@ -10,7 +10,7 @@ Configuration:
 """
 
 from datetime import datetime
-from airflow import DAG
+from airflow.sdk import DAG
 from airflow.utils.trigger_rule import TriggerRule
 
 # Import operators from plugins directory (Airflow automatically adds plugins to path)

@@ -2,12 +2,13 @@
 # For control plane only (no Airflow), use: requirements-control-plane.txt
 # For testing only (no Airflow), use: requirements-test.txt
 
-# Airflow (requires SQLAlchemy <2.0)
-apache-airflow==2.8.1
-apache-airflow-providers-amazon==8.16.0
-apache-airflow-providers-microsoft-azure==8.4.0
-apache-airflow-providers-mongo==5.3.2
-apache-airflow-providers-mysql==5.5.2
+# Airflow 3.0 (supports SQLAlchemy 2.0)
+apache-airflow==3.0.6
+apache-airflow-providers-fab==2.0.0
+apache-airflow-providers-amazon>=9.0.0
+apache-airflow-providers-microsoft-azure>=10.0.0
+apache-airflow-providers-mongo>=5.0.0
+apache-airflow-providers-mysql>=6.0.0
 
 # FastAPI and web framework
 fastapi==0.109.2
@@ -16,8 +17,8 @@ pydantic==2.6.1
 pydantic-settings==2.1.0
 
 # Database
-# NOTE: Airflow 2.8.1 requires SQLAlchemy <2.0, so using 1.4.x for compatibility
-sqlalchemy==1.4.53
+# NOTE: Airflow 3.0 supports SQLAlchemy 2.0
+sqlalchemy==2.0.25
 alembic==1.13.1
 pymysql==1.1.0
 greenlet==3.0.3
