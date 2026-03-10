@@ -17,11 +17,11 @@ Airflow Scheduler (cron: 0 2 * * *)
     → For each integration:
       1. Builds conf dict (same as control plane / Kafka consumer)
       2. Creates IntegrationRun record
-      3. Triggers s3_to_mongo_ondemand via Airflow REST API
+      3. Triggers s3_to_mongo_ondemand DAG via Airflow REST API
     → Returns summary of dispatched runs
 ```
 
-Each integration gets its own isolated ondemand DAG run, reusing the existing pipeline (`Prepare → Validate → Execute → Cleanup`) without modification.
+Each integration gets its own isolated DAG run on `s3_to_mongo_ondemand`, reusing the existing pipeline (`Prepare → Validate → Execute → Cleanup`) without modification. The `_ondemand` DAG is a shared pipeline — all trigger sources (control plane API, Kafka CDC, and the dispatcher) target it. The `dag_run_id` encodes the origin (e.g., `_scheduled_` for dispatcher, `_manual_` for API, `_cdc_` for Kafka).
 
 ## Why This Pattern
 
@@ -60,15 +60,21 @@ Located in `airflow/plugins/operators/dispatch_operators.py`.
 
    This is the same conf-building pattern used by the control plane's `integration_service` and `kafka_consumer_service`.
 
-3. **Trigger ondemand DAG** — POSTs to Airflow REST API:
+3. **Trigger the pipeline DAG** — POSTs to the `s3_to_mongo_ondemand` DAG via Airflow REST API. The DAG name is `_ondemand` because it's the same shared pipeline used by all trigger sources (API, Kafka, dispatcher). The `_scheduled_` in the `dag_run_id` distinguishes dispatcher-originated runs from other sources.
    ```
    POST /api/v2/dags/s3_to_mongo_ondemand/dagRuns
    {
-     "dag_run_id": "<workspace_id>_s3_to_mongo_ondemand_scheduled_<timestamp>",
-     "logical_date": "<unique ISO timestamp with microseconds>",
+     "dag_run_id": "e2e-test-ws-5cc71c1c_s3_to_mongo_ondemand_scheduled_20260310_204234_0",
+     "logical_date": "2026-03-10T20:42:34.012345Z",
      "conf": { ... merged conf ... }
    }
    ```
+
+   **`dag_run_id` format**: `{tenant_id}_{dag_id}_scheduled_{YYYYMMDD_HHMMSS_f}`
+   - `e2e-test-ws-5cc71c1c` — tenant/workspace ID
+   - `s3_to_mongo_ondemand` — target DAG ID
+   - `scheduled` — origin marker (vs `manual` from API or `cdc` from Kafka)
+   - `20260310_204234_0` — UTC timestamp with microsecond fragment
 
 4. **Create IntegrationRun** — inserts a tracking record in the control plane DB.
 
@@ -120,13 +126,15 @@ These are set in `docker-compose.yml` under `x-airflow-common > environment` and
 
 All three triggering paths build identical conf dicts:
 
-| Trigger Source | When | How |
-|---|---|---|
-| Control plane API | On-demand / manual | `integration_service.py` → REST API |
-| Kafka consumer | CDC event (integration created/updated) | `kafka_consumer_service.py` → REST API |
-| **Dispatcher DAG** | Cron schedule | `dispatch_operators.py` → REST API |
+All three triggering paths target the same `s3_to_mongo_ondemand` DAG and build identical conf dicts. The `dag_run_id` encodes the origin:
 
-All three query the same tables (`integrations`, `auths`) and merge credentials the same way, ensuring consistent behavior regardless of how a DAG run is triggered.
+| Trigger Source | When | Sample `dag_run_id` |
+|---|---|---|
+| Control plane API | On-demand / manual | `ws-abc123_s3_to_mongo_ondemand_manual_20260310_183116_3` |
+| Kafka consumer | CDC event | `ws-abc123_s3_to_mongo_ondemand_cdc_20260310_183335_2` |
+| **Dispatcher DAG** | Cron schedule | `ws-abc123_s3_to_mongo_ondemand_scheduled_20260310_204234_0` |
+
+All three query the same tables (`integrations`, `auths`) and merge credentials the same way, ensuring consistent behavior regardless of how a DAG run is triggered. The origin marker (`manual`, `cdc`, `scheduled`) makes it easy to trace how a run was initiated when debugging in the Airflow UI.
 
 ## Testing
 
