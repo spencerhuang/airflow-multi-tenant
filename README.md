@@ -1,3 +1,5 @@
+[![Unit Tests without Containers](https://github.com/spencerhuang/airflow-multi-tenant/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/spencerhuang/airflow-multi-tenant/actions/workflows/unit-tests.yml)
+
 # Multi-Tenant Airflow Architecture
 
 A scalable Airflow-based architecture supporting multi-tenancy with hybrid scheduling, CDC, and reusable connectors.
