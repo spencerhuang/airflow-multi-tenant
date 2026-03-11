@@ -112,7 +112,7 @@ Reusable modules wrapping data source APIs:
 
 ### Airflow DAGs
 
-- **Daily Scheduled DAGs**: [Dispatcher pattern](docs/DISPATCHER_PATTERN.md) — scheduled DAGs query the control plane DB for due integrations and trigger the ondemand DAG for each one. Each integration gets an isolated DAG run with full conf and IntegrationRun tracking.
+- **Daily Scheduled DAGs**: [Dispatcher pattern](docs/DISPATCHER_PATTERN.md) — scheduled DAGs query the control plane DB for due integrations and trigger the ondemand DAG for each one. Each integration gets an isolated DAG run with full conf and IntegrationRun tracking. Daily has to be picked on the hour. Weekly and Monthly do not get to pick the hour.
 - **On-Demand DAG**: Triggered via API for CDC, manual replays, and backfills
 
 ## Testing Strategy
@@ -124,12 +124,10 @@ Reusable modules wrapping data source APIs:
 
 ## TODO
 
-- Create remaining hourly dispatcher DAGs (daily_00 through daily_23) per workflow — only daily_02 exists as a working example
+- Create remaining hourly dispatcher DAGs (daily_00 through daily_23) per workflow — only daily_02 and 03 exist as a working example
 - k8s deployment not verified
 - Busy-Time Mitigation in section 9.3 was not implemented
-- Future start_date planner dag for all tenants and all workflows, basically a daily chron job to see which integrations will need weekly or monthly dag_run for tomorrow.
-- Future start_date dag (for weekly and monthly) per workflow. Will use DateTimeSensor with mode="reschedule"
-
+- To scale, kafka_consumer_service in control_plane needs to be its own micro-service, this would also allow fail-over. Once it is its own micro-service, can consider batch processing. This service itself needs to provide health-check
 
 
 ## License

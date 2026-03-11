@@ -1,7 +1,6 @@
 """Shared database utilities for Airflow tasks connecting to the control plane DB.
 
-Provides a pre-configured SQLAlchemy engine factory with connect_timeout,
-matching the control plane's DB_TIMEOUT default (5 seconds).
+Provides a pre-configured SQLAlchemy engine factory with connect_timeout
 """
 
 import os
@@ -13,8 +12,8 @@ from sqlalchemy.engine import Engine
 
 logger = logging.getLogger(__name__)
 
-# Default connect timeout in seconds — matches control_plane.app.core.retry.DB_TIMEOUT
-DEFAULT_DB_CONNECT_TIMEOUT = 5
+# Default db timeout for airflow tasks in seconds — same purpose as control_plane.app.core.retry.DB_TIMEOUT
+DEFAULT_DB_CONNECT_TIMEOUT = 30
 
 
 def create_control_plane_engine(
@@ -25,8 +24,7 @@ def create_control_plane_engine(
 
     Args:
         db_url: Database URL. If None, reads from CONTROL_PLANE_DB_URL env var.
-        connect_timeout: Connection timeout in seconds (default: 5, matching
-            the control plane's DB_TIMEOUT).
+        connect_timeout: Connection timeout in seconds (default: 30).
 
     Returns:
         A SQLAlchemy Engine instance.
