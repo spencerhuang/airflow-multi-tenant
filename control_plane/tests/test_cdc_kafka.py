@@ -7,7 +7,7 @@ Run with: docker-compose up -d && pytest control_plane/tests/test_cdc_kafka.py
 import pytest
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from kafka import KafkaProducer, KafkaConsumer
 from kafka.errors import NoBrokersAvailable
 
@@ -87,7 +87,7 @@ class TestKafkaConnectivity:
         """Test that producer can send messages."""
         test_message = {
             "event_type": "test",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {"test": "value"},
         }
 
@@ -106,7 +106,7 @@ class TestCDCEvents:
         """Test sending and receiving integration created event."""
         event = {
             "event_type": "integration.created",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "workspace_id": "test-ws-001",
             "integration_id": 1,
             "integration_type": "S3ToMongo",
@@ -146,7 +146,7 @@ class TestCDCEvents:
         """Test sending and receiving integration updated event."""
         event = {
             "event_type": "integration.updated",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "workspace_id": "test-ws-001",
             "integration_id": 1,
             "changes": {
@@ -184,7 +184,7 @@ class TestCDCEvents:
         """Test sending and receiving integration run started event."""
         event = {
             "event_type": "integration_run.started",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "workspace_id": "test-ws-001",
             "integration_id": 1,
             "run_id": 123,
@@ -222,17 +222,17 @@ class TestCDCEvents:
         events = [
             {
                 "event_type": "test.event1",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "sequence": 1,
             },
             {
                 "event_type": "test.event2",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "sequence": 2,
             },
             {
                 "event_type": "test.event3",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "sequence": 3,
             },
         ]
@@ -283,7 +283,7 @@ class TestKafkaErrorHandling:
         large_data = {"data": "x" * 10000, "array": list(range(1000))}
         test_message = {
             "event_type": "test.large",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "payload": large_data,
         }
 

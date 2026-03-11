@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from typing import Optional, Callable, Dict
-from datetime import datetime
+from datetime import datetime, timezone
 
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaError
@@ -141,7 +141,7 @@ class KafkaConsumerService:
                 "error": {
                     "type": type(error).__name__,
                     "message": str(error),
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 },
                 "retry_count": retry_count,
                 "source_topic": self.topic,
@@ -651,15 +651,14 @@ class KafkaConsumerService:
 
             # --- Step 5: Trigger Airflow DAG via REST API ---
             import requests
-            from datetime import datetime
 
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")[:17]
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:17]
             tenant_id = conf.get("tenant_id", "unknown")
             custom_run_id = f"{tenant_id}_{dag_id}_manual_{timestamp}"
 
             payload = {
                 "dag_run_id": custom_run_id,
-                "logical_date": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "logical_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "conf": conf,
             }
 

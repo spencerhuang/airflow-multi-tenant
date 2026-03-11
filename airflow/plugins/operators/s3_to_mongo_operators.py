@@ -3,7 +3,7 @@
 import json
 import os
 from typing import Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 from airflow.sdk import BaseOperator
 from airflow.models import XCom
@@ -25,6 +25,9 @@ from shared_models.tables import (
     integration_run_errors as integration_run_errors_table,
 )
 
+# Shared error tracking utilities
+from shared_utils import push_task_errors, pull_all_task_errors
+
 
 class PrepareS3ToMongoTask(PrepareTask):
     """
@@ -34,6 +37,7 @@ class PrepareS3ToMongoTask(PrepareTask):
     - S3 bucket and prefix
     - MongoDB connection details
     - IAM role or credentials
+    - Creates IntegrationRun record in control plane DB
     """
 
     def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -42,6 +46,7 @@ class PrepareS3ToMongoTask(PrepareTask):
 
         Extracts non-sensitive config (returned via default XCom) and
         credentials (pushed to a separate 'credentials' XCom key).
+        Creates an IntegrationRun record so CleanUp can update it later.
 
         Args:
             context: Airflow task context with dag_run.conf
@@ -51,42 +56,86 @@ class PrepareS3ToMongoTask(PrepareTask):
         """
         dag_run_conf = context["dag_run"].conf or {}
         ti = context["ti"]
+        dag_run = context["dag_run"]
 
-        self.log.info(f"Preparing S3 to MongoDB integration: {dag_run_conf.get('integration_id')}")
+        integration_id = dag_run_conf.get("integration_id")
+        self.log.info(f"Preparing S3 to MongoDB integration: {integration_id}")
 
-        # Extract configuration
-        s3_bucket = dag_run_conf.get("s3_bucket")
-        s3_prefix = dag_run_conf.get("s3_prefix", "")
-        mongo_collection = dag_run_conf.get("mongo_collection")
+        # Create IntegrationRun record FIRST — must exist before any logic
+        # that could fail, so CleanUp always has a row to update.
+        self._create_integration_run(integration_id, dag_run.run_id)
 
-        # Validate required parameters
-        if not s3_bucket:
-            raise ValueError("s3_bucket is required in configuration")
-        if not mongo_collection:
-            raise ValueError("mongo_collection is required in configuration")
+        try:
+            # Extract configuration
+            s3_bucket = dag_run_conf.get("s3_bucket")
+            s3_prefix = dag_run_conf.get("s3_prefix", "")
+            mongo_collection = dag_run_conf.get("mongo_collection")
 
-        self.log.info(f"S3 bucket: {s3_bucket}, prefix: {s3_prefix}")
-        self.log.info(f"MongoDB collection: {mongo_collection}")
+            # Validate required parameters
+            if not s3_bucket:
+                raise ValueError("s3_bucket is required in configuration")
+            if not mongo_collection:
+                raise ValueError("mongo_collection is required in configuration")
 
-        # Push credentials to a separate XCom key so downstream tasks
-        # can use them without exposing secrets in the default return value.
-        credentials = {
-            "s3_endpoint_url": dag_run_conf.get("s3_endpoint_url", "http://minio:9000"),
-            "s3_access_key": dag_run_conf.get("s3_access_key", "minioadmin"),
-            "s3_secret_key": dag_run_conf.get("s3_secret_key", "minioadmin"),
-            "mongo_uri": dag_run_conf.get("mongo_uri", "mongodb://root:root@mongodb:27017/"),
-            "mongo_database": dag_run_conf.get("mongo_database", "test_database"),
-        }
-        ti.xcom_push(key="credentials", value=credentials)
-        self.log.info("Credentials pushed to XCom (separate key)")
+            self.log.info(f"S3 bucket: {s3_bucket}, prefix: {s3_prefix}")
+            self.log.info(f"MongoDB collection: {mongo_collection}")
 
-        # Return non-sensitive config (default XCom)
-        return {
-            "s3_bucket": s3_bucket,
-            "s3_prefix": s3_prefix,
-            "mongo_collection": mongo_collection,
-            "integration_id": dag_run_conf.get("integration_id"),
-        }
+            # Push credentials to a separate XCom key so downstream tasks
+            # can use them without exposing secrets in the default return value.
+            credentials = {
+                "s3_endpoint_url": dag_run_conf.get("s3_endpoint_url", "http://minio:9000"),
+                "s3_access_key": dag_run_conf.get("s3_access_key", "minioadmin"),
+                "s3_secret_key": dag_run_conf.get("s3_secret_key", "minioadmin"),
+                "mongo_uri": dag_run_conf.get("mongo_uri", "mongodb://root:root@mongodb:27017/"),
+                "mongo_database": dag_run_conf.get("mongo_database", "test_database"),
+            }
+            ti.xcom_push(key="credentials", value=credentials)
+            self.log.info("Credentials pushed to XCom (separate key)")
+
+            # Return non-sensitive config (default XCom)
+            return {
+                "s3_bucket": s3_bucket,
+                "s3_prefix": s3_prefix,
+                "mongo_collection": mongo_collection,
+                "integration_id": integration_id,
+            }
+
+        except Exception as e:
+            # Push error to XCom so CleanUp can persist it
+            push_task_errors(ti, "prepare", [
+                {"error_code": "PREPARE_ERROR", "message": str(e)},
+            ], log=self.log)
+            raise
+
+    def _create_integration_run(self, integration_id: Any, dag_run_id: str) -> None:
+        """Create an IntegrationRun record in the control plane DB."""
+        if integration_id is None:
+            self.log.info("No integration_id; skipping IntegrationRun creation")
+            return
+
+        db_url = os.environ.get("CONTROL_PLANE_DB_URL")
+        if not db_url:
+            self.log.warning("CONTROL_PLANE_DB_URL not set; skipping IntegrationRun creation")
+            return
+
+        try:
+            engine = create_engine(db_url)
+            with engine.begin() as conn:
+                conn.execute(
+                    integration_runs_table.insert().values(
+                        integration_id=integration_id,
+                        dag_run_id=dag_run_id,
+                        execution_date=datetime.now(timezone.utc),
+                        started=datetime.now(timezone.utc),
+                    )
+                )
+            engine.dispose()
+            self.log.info(
+                f"Created IntegrationRun for integration_id={integration_id}, "
+                f"dag_run_id={dag_run_id}"
+            )
+        except Exception as e:
+            self.log.error(f"Failed to create IntegrationRun: {e}")
 
 
 class ValidateS3ToMongoTask(ValidateTask):
@@ -177,6 +226,9 @@ class ValidateS3ToMongoTask(ValidateTask):
         except Exception as e:
             error_msg = f"Validation failed: {str(e)}"
             self.log.error(error_msg)
+            push_task_errors(ti, "validate", [
+                {"error_code": "VALIDATION_ERROR", "message": error_msg},
+            ], log=self.log)
             raise Exception(error_msg)
 
 
@@ -304,7 +356,7 @@ class ExecuteS3ToMongoTask(BaseOperator):
 
                     # Add metadata to each record
                     for record in records:
-                        record['_import_timestamp'] = datetime.utcnow()
+                        record['_import_timestamp'] = datetime.now(timezone.utc)
                         record['_source_bucket'] = s3_bucket
                         record['_source_key'] = key
 
@@ -332,6 +384,13 @@ class ExecuteS3ToMongoTask(BaseOperator):
             # 5. Close connections
             mongo_client.close()
 
+            # Push data-level errors to XCom for CleanUp to persist
+            if stats["error_messages"]:
+                push_task_errors(ti, "execute", [
+                    {"error_code": "DATA_ERROR", "message": msg}
+                    for msg in stats["error_messages"]
+                ], log=self.log)
+
             self.log.info(f"✓ Transfer complete: {stats}")
             return stats
 
@@ -340,6 +399,11 @@ class ExecuteS3ToMongoTask(BaseOperator):
             self.log.error(error_msg)
             stats["errors"] += 1
             stats["error_messages"].append(error_msg)
+            # Push all accumulated errors to XCom before re-raising
+            push_task_errors(ti, "execute", [
+                {"error_code": "EXECUTE_ERROR", "message": msg}
+                for msg in stats["error_messages"]
+            ], log=self.log)
             raise
 
 
@@ -391,7 +455,7 @@ class CleanUpS3ToMongoTask(CleanUpTask):
         self._clear_sensitive_xcom(context)
 
         # 3. Update IntegrationRun status in control plane database
-        self._update_integration_run_status(context, integration_id, stats)
+        self._update_integration_run_status(context, integration_id)
 
         self.log.info("Cleanup complete")
 
@@ -417,7 +481,6 @@ class CleanUpS3ToMongoTask(CleanUpTask):
         self,
         context: Dict[str, Any],
         integration_id: Any,
-        stats: Any,
     ) -> None:
         """Update IntegrationRun in control plane DB with final status and errors."""
         if integration_id is None:
@@ -430,20 +493,17 @@ class CleanUpS3ToMongoTask(CleanUpTask):
             return
 
         try:
+            ti = context["ti"]
             dag_run = context["dag_run"]
             dag_run_id = dag_run.run_id
 
-            # Collect errors from upstream task states
-            upstream_errors = self._collect_upstream_errors(context)
+            # Collect errors from XCom (detailed messages pushed by upstream tasks)
+            upstream_task_ids = ["prepare", "validate", "execute"]
+            upstream_errors = pull_all_task_errors(ti, upstream_task_ids)
 
-            # Also include data-level errors from execute stats
-            if stats and isinstance(stats, dict) and stats.get("errors", 0) > 0:
-                for msg in stats.get("error_messages", []):
-                    upstream_errors.append({
-                        "task_id": "execute",
-                        "error_code": "DATA_ERROR",
-                        "message": msg,
-                    })
+            # Fallback: check task states for tasks that failed without pushing errors
+            state_errors = self._collect_upstream_state_errors(context, upstream_errors)
+            upstream_errors.extend(state_errors)
 
             is_success = len(upstream_errors) == 0
 
@@ -461,7 +521,7 @@ class CleanUpS3ToMongoTask(CleanUpTask):
                 if row is None:
                     self.log.info(
                         f"Step 3: No IntegrationRun found for dag_run_id={dag_run_id}. "
-                        "This is expected for scheduler-triggered runs (not API-triggered)."
+                        "This is normal when integration_id is absent from conf."
                     )
                     engine.dispose()
                     return
@@ -473,7 +533,7 @@ class CleanUpS3ToMongoTask(CleanUpTask):
                     integration_runs_table.update()
                     .where(integration_runs_table.c.run_id == run_id)
                     .values(
-                        ended=datetime.utcnow(),
+                        ended=datetime.now(timezone.utc),
                         is_success=is_success,
                     )
                 )
@@ -486,7 +546,7 @@ class CleanUpS3ToMongoTask(CleanUpTask):
                             error_code=error["error_code"],
                             message=str(error["message"])[:2000],
                             task_id=error["task_id"],
-                            timestamp=datetime.utcnow(),
+                            timestamp=datetime.now(timezone.utc),
                         )
                     )
 
@@ -501,10 +561,21 @@ class CleanUpS3ToMongoTask(CleanUpTask):
         except Exception as e:
             self.log.error(f"Step 3: Failed to update IntegrationRun status: {e}")
 
-    def _collect_upstream_errors(self, context: Dict[str, Any]) -> List[Dict[str, str]]:
-        """Check upstream task states and collect error information."""
+    def _collect_upstream_state_errors(
+        self,
+        context: Dict[str, Any],
+        xcom_errors: List[Dict[str, str]],
+    ) -> List[Dict[str, str]]:
+        """Fallback: check task states for tasks that failed but didn't push XCom errors.
+
+        Only adds a generic state-based error if the task_id isn't already
+        represented in xcom_errors (avoids duplicates).
+        """
         errors = []
         upstream_task_ids = ["prepare", "validate", "execute"]
+
+        # task_ids already covered by XCom errors
+        covered_task_ids = {e["task_id"] for e in xcom_errors}
 
         try:
             dag_run = context["dag_run"]
@@ -512,15 +583,16 @@ class CleanUpS3ToMongoTask(CleanUpTask):
 
             for task_instance in task_instances:
                 if task_instance.task_id in upstream_task_ids:
-                    if task_instance.state in ("failed", "upstream_failed"):
-                        errors.append({
-                            "task_id": task_instance.task_id,
-                            "error_code": f"TASK_{task_instance.state.upper()}",
-                            "message": (
-                                f"Task '{task_instance.task_id}' ended in state "
-                                f"'{task_instance.state}'"
-                            ),
-                        })
+                    if task_instance.task_id not in covered_task_ids:
+                        if task_instance.state in ("failed", "upstream_failed"):
+                            errors.append({
+                                "task_id": task_instance.task_id,
+                                "error_code": f"TASK_{task_instance.state.upper()}",
+                                "message": (
+                                    f"Task '{task_instance.task_id}' ended in state "
+                                    f"'{task_instance.state}'"
+                                ),
+                            })
         except Exception as e:
             self.log.warning(f"Could not check upstream task states: {e}")
             errors.append({

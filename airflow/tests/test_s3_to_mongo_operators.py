@@ -7,7 +7,7 @@ without Apache Airflow installed (e.g., in the host dev environment).
 import pytest
 import os
 import sys
-from unittest.mock import Mock, MagicMock, patch, PropertyMock
+from unittest.mock import Mock, MagicMock, patch, call
 from types import ModuleType
 from datetime import datetime
 
@@ -83,6 +83,19 @@ from operators.s3_to_mongo_operators import (
 from operators.dispatch_operators import DispatchScheduledIntegrationsTask
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_prepare_context(conf, run_id="test_run_123"):
+    """Build a mock context for Prepare task tests."""
+    mock_ti = Mock()
+    mock_dag_run = Mock()
+    mock_dag_run.conf = conf
+    mock_dag_run.run_id = run_id
+    return {"dag_run": mock_dag_run, "ti": mock_ti}
+
+
 class TestPrepareS3ToMongoTask:
     """Test PrepareS3ToMongoTask operator."""
 
@@ -90,9 +103,7 @@ class TestPrepareS3ToMongoTask:
         """Test successful execution pushes config and credentials."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
-        mock_ti = Mock()
-        mock_dag_run = Mock()
-        mock_dag_run.conf = {
+        context = _make_prepare_context({
             "integration_id": 1,
             "s3_bucket": "test-bucket",
             "s3_prefix": "data/",
@@ -102,8 +113,7 @@ class TestPrepareS3ToMongoTask:
             "s3_secret_key": "mysecret",
             "mongo_uri": "mongodb://user:pass@host:27017/",
             "mongo_database": "mydb",
-        }
-        context = {"dag_run": mock_dag_run, "ti": mock_ti}
+        })
 
         result = operator.execute(context)
 
@@ -117,6 +127,7 @@ class TestPrepareS3ToMongoTask:
         assert "mongo_uri" not in result
 
         # Credentials should be pushed as separate XCom key
+        mock_ti = context["ti"]
         mock_ti.xcom_push.assert_called_once_with(
             key="credentials",
             value={
@@ -132,18 +143,15 @@ class TestPrepareS3ToMongoTask:
         """Test that missing credentials use defaults."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
-        mock_ti = Mock()
-        mock_dag_run = Mock()
-        mock_dag_run.conf = {
+        context = _make_prepare_context({
             "s3_bucket": "test-bucket",
             "mongo_collection": "test_collection",
-        }
-        context = {"dag_run": mock_dag_run, "ti": mock_ti}
+        })
 
         operator.execute(context)
 
         # Verify defaults are used in credentials
-        creds = mock_ti.xcom_push.call_args[1]["value"]
+        creds = context["ti"].xcom_push.call_args[1]["value"]
         assert creds["s3_endpoint_url"] == "http://minio:9000"
         assert creds["s3_access_key"] == "minioadmin"
         assert creds["s3_secret_key"] == "minioadmin"
@@ -154,37 +162,48 @@ class TestPrepareS3ToMongoTask:
         """Test execution fails when s3_bucket is missing."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
-        mock_ti = Mock()
-        mock_dag_run = Mock()
-        mock_dag_run.conf = {"mongo_collection": "test_collection"}
-        context = {"dag_run": mock_dag_run, "ti": mock_ti}
+        context = _make_prepare_context({"mongo_collection": "test_collection"})
 
         with pytest.raises(ValueError, match="s3_bucket is required"):
             operator.execute(context)
+
+        # Verify error was pushed to XCom
+        context["ti"].xcom_push.assert_called_once_with(
+            key="task_errors_prepare",
+            value=[{
+                "task_id": "prepare",
+                "error_code": "PREPARE_ERROR",
+                "message": "s3_bucket is required in configuration",
+            }],
+        )
 
     def test_execute_missing_mongo_collection(self):
         """Test execution fails when mongo_collection is missing."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
-        mock_ti = Mock()
-        mock_dag_run = Mock()
-        mock_dag_run.conf = {"s3_bucket": "test-bucket"}
-        context = {"dag_run": mock_dag_run, "ti": mock_ti}
+        context = _make_prepare_context({"s3_bucket": "test-bucket"})
 
         with pytest.raises(ValueError, match="mongo_collection is required"):
             operator.execute(context)
+
+        # Verify error was pushed to XCom
+        context["ti"].xcom_push.assert_called_once_with(
+            key="task_errors_prepare",
+            value=[{
+                "task_id": "prepare",
+                "error_code": "PREPARE_ERROR",
+                "message": "mongo_collection is required in configuration",
+            }],
+        )
 
     def test_execute_with_default_prefix(self):
         """Test execution with default s3_prefix."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
-        mock_ti = Mock()
-        mock_dag_run = Mock()
-        mock_dag_run.conf = {
+        context = _make_prepare_context({
             "s3_bucket": "test-bucket",
             "mongo_collection": "test_collection",
-        }
-        context = {"dag_run": mock_dag_run, "ti": mock_ti}
+        })
 
         result = operator.execute(context)
         assert result["s3_prefix"] == ""
@@ -193,13 +212,93 @@ class TestPrepareS3ToMongoTask:
         """Test execution with None conf."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
-        mock_ti = Mock()
-        mock_dag_run = Mock()
-        mock_dag_run.conf = None
-        context = {"dag_run": mock_dag_run, "ti": mock_ti}
+        context = _make_prepare_context(None)
 
         with pytest.raises(ValueError):
             operator.execute(context)
+
+    @patch("operators.s3_to_mongo_operators.create_engine")
+    def test_execute_creates_integration_run(self, mock_create_engine):
+        """Test that Prepare creates an IntegrationRun record in the control plane DB."""
+        operator = PrepareS3ToMongoTask(task_id="prepare")
+
+        mock_conn = MagicMock()
+        mock_engine = MagicMock()
+        mock_create_engine.return_value = mock_engine
+        mock_engine.begin.return_value.__enter__ = Mock(return_value=mock_conn)
+        mock_engine.begin.return_value.__exit__ = Mock(return_value=False)
+
+        context = _make_prepare_context({
+            "integration_id": 42,
+            "s3_bucket": "test-bucket",
+            "mongo_collection": "test_collection",
+        }, run_id="ws1_s3_to_mongo_ondemand_scheduled_20260310_0200")
+
+        with patch.dict(os.environ, {"CONTROL_PLANE_DB_URL": "mysql+pymysql://test"}):
+            result = operator.execute(context)
+
+        assert result["integration_id"] == 42
+
+        # Verify INSERT was called on integration_runs
+        mock_conn.execute.assert_called_once()
+        insert_call = mock_conn.execute.call_args[0][0]
+        # The insert statement targets integration_runs table
+        assert "integration_runs" in str(insert_call)
+
+    def test_execute_skips_integration_run_without_db_url(self):
+        """Test that Prepare skips IntegrationRun creation when no DB URL."""
+        operator = PrepareS3ToMongoTask(task_id="prepare")
+
+        context = _make_prepare_context({
+            "integration_id": 1,
+            "s3_bucket": "test-bucket",
+            "mongo_collection": "test_collection",
+        })
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CONTROL_PLANE_DB_URL", None)
+            result = operator.execute(context)
+
+        # Should succeed without DB interaction
+        assert result["integration_id"] == 1
+
+    def test_execute_skips_integration_run_without_integration_id(self):
+        """Test that Prepare skips IntegrationRun creation when no integration_id."""
+        operator = PrepareS3ToMongoTask(task_id="prepare")
+
+        context = _make_prepare_context({
+            "s3_bucket": "test-bucket",
+            "mongo_collection": "test_collection",
+        })
+
+        result = operator.execute(context)
+        assert result["integration_id"] is None
+
+    @patch("operators.s3_to_mongo_operators.create_engine")
+    def test_execute_creates_integration_run_even_on_failure(self, mock_create_engine):
+        """Test that IntegrationRun is created even when validation fails."""
+        operator = PrepareS3ToMongoTask(task_id="prepare")
+
+        mock_conn = MagicMock()
+        mock_engine = MagicMock()
+        mock_create_engine.return_value = mock_engine
+        mock_engine.begin.return_value.__enter__ = Mock(return_value=mock_conn)
+        mock_engine.begin.return_value.__exit__ = Mock(return_value=False)
+
+        # Has integration_id but missing s3_bucket — validation will fail
+        context = _make_prepare_context({
+            "integration_id": 42,
+            "mongo_collection": "test_collection",
+        })
+
+        with patch.dict(os.environ, {"CONTROL_PLANE_DB_URL": "mysql+pymysql://test"}):
+            with pytest.raises(ValueError, match="s3_bucket is required"):
+                operator.execute(context)
+
+        # IntegrationRun should still have been created before the error
+        mock_conn.execute.assert_called_once()
+        insert_call = mock_conn.execute.call_args[0][0]
+        assert "integration_runs" in str(insert_call)
 
 
 class TestValidateS3ToMongoTask:
@@ -264,7 +363,7 @@ class TestValidateS3ToMongoTask:
     def test_execute_validation_failure(
         self, mock_s3_auth_cls, mock_s3_client_cls, mock_mongo_auth_cls, mock_mongo_client_cls
     ):
-        """Test that validation failure raises exception."""
+        """Test that validation failure raises exception and pushes error to XCom."""
         operator = ValidateS3ToMongoTask(task_id="validate")
 
         mock_s3_client_cls.return_value.list_objects.side_effect = Exception("Access denied")
@@ -283,9 +382,37 @@ class TestValidateS3ToMongoTask:
         with pytest.raises(Exception, match="Validation failed"):
             operator.execute(context)
 
+        # Verify error was pushed to XCom
+        mock_ti.xcom_push.assert_called_once_with(
+            key="task_errors_validate",
+            value=[{
+                "task_id": "validate",
+                "error_code": "VALIDATION_ERROR",
+                "message": "Validation failed: Access denied",
+            }],
+        )
+
 
 class TestExecuteS3ToMongoTask:
     """Test ExecuteS3ToMongoTask operator."""
+
+    def _make_execute_context(self):
+        """Build a mock context for Execute task tests."""
+        mock_ti = Mock()
+        mock_ti.xcom_pull.side_effect = lambda task_ids=None, key=None: {
+            ("prepare", None): {
+                "s3_bucket": "test-bucket",
+                "s3_prefix": "data/",
+                "mongo_collection": "test_collection",
+            },
+            ("prepare", "credentials"): {
+                "s3_endpoint_url": "http://minio:9000",
+                "s3_access_key": "mykey", "s3_secret_key": "mysecret",
+                "mongo_uri": "mongodb://user:pass@host:27017/",
+                "mongo_database": "mydb",
+            },
+        }[(task_ids, key)]
+        return {"ti": mock_ti}
 
     @patch("operators.s3_to_mongo_operators.MongoClient")
     @patch("operators.s3_to_mongo_operators.MongoAuth")
@@ -301,21 +428,7 @@ class TestExecuteS3ToMongoTask:
 
         mock_s3_client_cls.return_value.list_objects.return_value = []
 
-        mock_ti = Mock()
-        mock_ti.xcom_pull.side_effect = lambda task_ids=None, key=None: {
-            ("prepare", None): {
-                "s3_bucket": "test-bucket",
-                "s3_prefix": "data/",
-                "mongo_collection": "test_collection",
-            },
-            ("prepare", "credentials"): {
-                "s3_endpoint_url": "http://minio:9000",
-                "s3_access_key": "mykey", "s3_secret_key": "mysecret",
-                "mongo_uri": "mongodb://user:pass@host:27017/",
-                "mongo_database": "mydb",
-            },
-        }[(task_ids, key)]
-        context = {"ti": mock_ti}
+        context = self._make_execute_context()
 
         result = operator.execute(context)
 
@@ -323,7 +436,7 @@ class TestExecuteS3ToMongoTask:
         assert result["records_read"] == 0
         assert result["records_written"] == 0
         assert result["errors"] == 0
-        mock_ti.xcom_pull.assert_any_call(task_ids="prepare", key="credentials")
+        context["ti"].xcom_pull.assert_any_call(task_ids="prepare", key="credentials")
 
     @patch("operators.s3_to_mongo_operators.MongoClient")
     @patch("operators.s3_to_mongo_operators.MongoAuth")
@@ -347,27 +460,55 @@ class TestExecuteS3ToMongoTask:
         ]
         mock_mongo_client_cls.return_value.insert_many.return_value = ["id1", "id2", "id3"]
 
-        mock_ti = Mock()
-        mock_ti.xcom_pull.side_effect = lambda task_ids=None, key=None: {
-            ("prepare", None): {
-                "s3_bucket": "test-bucket",
-                "s3_prefix": "data/",
-                "mongo_collection": "test_collection",
-            },
-            ("prepare", "credentials"): {
-                "s3_endpoint_url": "http://minio:9000",
-                "s3_access_key": "mykey", "s3_secret_key": "mysecret",
-                "mongo_uri": "mongodb://user:pass@host:27017/",
-                "mongo_database": "mydb",
-            },
-        }[(task_ids, key)]
-        context = {"ti": mock_ti}
+        context = self._make_execute_context()
 
         result = operator.execute(context)
 
         assert result["files_processed"] == 2
         assert result["records_read"] == 3
         assert result["errors"] == 0
+
+        # No errors → no xcom_push for task_errors
+        for c in context["ti"].xcom_push.call_args_list:
+            assert "task_errors" not in str(c)
+
+    @patch("operators.s3_to_mongo_operators.MongoClient")
+    @patch("operators.s3_to_mongo_operators.MongoAuth")
+    @patch("operators.s3_to_mongo_operators.S3Reader")
+    @patch("operators.s3_to_mongo_operators.S3Client")
+    @patch("operators.s3_to_mongo_operators.S3Auth")
+    def test_execute_pushes_data_errors_to_xcom(
+        self, mock_s3_auth_cls, mock_s3_client_cls, mock_s3_reader_cls,
+        mock_mongo_auth_cls, mock_mongo_client_cls
+    ):
+        """Test that data-level errors are pushed to XCom for CleanUp."""
+        operator = ExecuteS3ToMongoTask(task_id="execute")
+
+        mock_s3_client_cls.return_value.list_objects.return_value = [
+            {"Key": "data/good.json"},
+            {"Key": "data/bad.json"},
+        ]
+        mock_s3_reader_cls.return_value.read_json.side_effect = [
+            {"id": 1, "name": "Alice"},
+            Exception("corrupt file"),
+        ]
+        mock_mongo_client_cls.return_value.insert_many.return_value = ["id1"]
+
+        context = self._make_execute_context()
+
+        result = operator.execute(context)
+
+        assert result["files_processed"] == 1
+        assert result["errors"] == 1
+
+        # Verify error was pushed to XCom
+        context["ti"].xcom_push.assert_called_once()
+        push_call = context["ti"].xcom_push.call_args
+        assert push_call[1]["key"] == "task_errors_execute"
+        errors = push_call[1]["value"]
+        assert len(errors) == 1
+        assert errors[0]["error_code"] == "DATA_ERROR"
+        assert "corrupt file" in errors[0]["message"]
 
 
 class TestCleanUpS3ToMongoTask:
@@ -379,16 +520,28 @@ class TestCleanUpS3ToMongoTask:
         stats=None,
         dag_run_conf=None,
         task_states=None,
+        xcom_errors=None,
     ):
-        """Helper to build a mock Airflow context."""
+        """Helper to build a mock Airflow context.
+
+        Args:
+            xcom_errors: dict mapping task_id → list of error dicts.
+                e.g. {"validate": [{"task_id": "validate", "error_code": "...", "message": "..."}]}
+        """
+        xcom_errors = xcom_errors or {}
         mock_ti = Mock()
 
         def xcom_pull_side_effect(task_ids=None, key=None):
+            # XCom error keys (called by pull_all_task_errors with key= only)
+            if key and key.startswith("task_errors_"):
+                task_id = key.replace("task_errors_", "")
+                return xcom_errors.get(task_id)
+            # Standard XCom pulls
             if task_ids == "prepare" and key == "credentials":
                 return {"s3_access_key": "secret"}
             if task_ids == "prepare" and key is None:
                 return config
-            if task_ids == "execute":
+            if task_ids == "execute" and key is None:
                 return stats
             return None
 
@@ -399,7 +552,7 @@ class TestCleanUpS3ToMongoTask:
         mock_dag_run.dag_id = "test_dag"
         mock_dag_run.run_id = "test_run_123"
 
-        # Mock task instances for upstream error checking
+        # Mock task instances for upstream error checking (fallback)
         task_instances = []
         if task_states:
             for tid, state in task_states.items():
@@ -418,7 +571,7 @@ class TestCleanUpS3ToMongoTask:
 
     @patch("operators.s3_to_mongo_operators.create_engine")
     def test_execute_success_updates_db(self, mock_create_engine):
-        """Test cleanup updates IntegrationRun on success."""
+        """Test cleanup updates IntegrationRun on success (no errors in XCom)."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
         mock_conn = MagicMock()
@@ -434,7 +587,6 @@ class TestCleanUpS3ToMongoTask:
 
         context = self._make_context(
             config={"integration_id": 1, "s3_bucket": "b", "s3_prefix": "", "mongo_collection": "c"},
-            stats={"files_processed": 5, "records_read": 100, "records_written": 100, "errors": 0, "error_messages": []},
             task_states={"prepare": "success", "validate": "success", "execute": "success"},
         )
 
@@ -447,8 +599,8 @@ class TestCleanUpS3ToMongoTask:
         mock_conn.commit.assert_called_once()
 
     @patch("operators.s3_to_mongo_operators.create_engine")
-    def test_execute_records_upstream_failures(self, mock_create_engine):
-        """Test cleanup records errors when upstream tasks fail."""
+    def test_execute_records_xcom_errors(self, mock_create_engine):
+        """Test cleanup persists detailed errors from XCom to integration_run_errors."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
         mock_conn = MagicMock()
@@ -457,11 +609,79 @@ class TestCleanUpS3ToMongoTask:
         mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
         mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
 
-        # Simulate finding an IntegrationRun record
         mock_result = Mock()
         mock_result.fetchone.return_value = (42,)
         mock_conn.execute.return_value = mock_result
 
+        context = self._make_context(
+            config={"integration_id": 1},
+            task_states={
+                "prepare": "success",
+                "validate": "failed",
+                "execute": "upstream_failed",
+            },
+            xcom_errors={
+                "validate": [
+                    {"task_id": "validate", "error_code": "VALIDATION_ERROR", "message": "S3 bucket not found"},
+                ],
+            },
+        )
+
+        with patch.dict(os.environ, {"CONTROL_PLANE_DB_URL": "mysql+pymysql://test"}):
+            operator.execute(context)
+
+        # SELECT + UPDATE + 1 INSERT (validate XCom error) +
+        # 1 INSERT (execute state fallback, since no XCom error for execute) = 4 calls
+        assert mock_conn.execute.call_count == 4
+
+    @patch("operators.s3_to_mongo_operators.create_engine")
+    def test_execute_records_data_errors_from_xcom(self, mock_create_engine):
+        """Test cleanup records data-level errors pushed by Execute task."""
+        operator = CleanUpS3ToMongoTask(task_id="cleanup")
+
+        mock_conn = MagicMock()
+        mock_engine = MagicMock()
+        mock_create_engine.return_value = mock_engine
+        mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
+
+        mock_result = Mock()
+        mock_result.fetchone.return_value = (42,)
+        mock_conn.execute.return_value = mock_result
+
+        context = self._make_context(
+            config={"integration_id": 1},
+            task_states={"prepare": "success", "validate": "success", "execute": "success"},
+            xcom_errors={
+                "execute": [
+                    {"task_id": "execute", "error_code": "DATA_ERROR", "message": "JSON parse error in file1.json"},
+                    {"task_id": "execute", "error_code": "DATA_ERROR", "message": "Error in file2.json"},
+                ],
+            },
+        )
+
+        with patch.dict(os.environ, {"CONTROL_PLANE_DB_URL": "mysql+pymysql://test"}):
+            operator.execute(context)
+
+        # SELECT + UPDATE + 2 INSERTs (two data errors from XCom) = 4 calls
+        assert mock_conn.execute.call_count == 4
+
+    @patch("operators.s3_to_mongo_operators.create_engine")
+    def test_execute_state_fallback_when_no_xcom_errors(self, mock_create_engine):
+        """Test that task state is used as fallback when XCom errors are absent."""
+        operator = CleanUpS3ToMongoTask(task_id="cleanup")
+
+        mock_conn = MagicMock()
+        mock_engine = MagicMock()
+        mock_create_engine.return_value = mock_engine
+        mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
+
+        mock_result = Mock()
+        mock_result.fetchone.return_value = (42,)
+        mock_conn.execute.return_value = mock_result
+
+        # No xcom_errors — task states used as fallback
         context = self._make_context(
             config={"integration_id": 1},
             task_states={
@@ -478,8 +698,8 @@ class TestCleanUpS3ToMongoTask:
         assert mock_conn.execute.call_count == 4
 
     @patch("operators.s3_to_mongo_operators.create_engine")
-    def test_execute_records_data_errors_from_stats(self, mock_create_engine):
-        """Test cleanup records data-level errors from execute stats."""
+    def test_execute_no_duplicate_errors_from_xcom_and_state(self, mock_create_engine):
+        """Test that errors from XCom don't get duplicated by state fallback."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
         mock_conn = MagicMock()
@@ -492,19 +712,26 @@ class TestCleanUpS3ToMongoTask:
         mock_result.fetchone.return_value = (42,)
         mock_conn.execute.return_value = mock_result
 
+        # validate has both XCom error AND failed state
         context = self._make_context(
             config={"integration_id": 1},
-            stats={
-                "files_processed": 3, "records_read": 10, "records_written": 8,
-                "errors": 2, "error_messages": ["JSON parse error in file1.json", "Error in file2.json"],
+            task_states={
+                "prepare": "success",
+                "validate": "failed",
+                "execute": "upstream_failed",
             },
-            task_states={"prepare": "success", "validate": "success", "execute": "success"},
+            xcom_errors={
+                "validate": [
+                    {"task_id": "validate", "error_code": "VALIDATION_ERROR", "message": "S3 bucket not found"},
+                ],
+            },
         )
 
         with patch.dict(os.environ, {"CONTROL_PLANE_DB_URL": "mysql+pymysql://test"}):
             operator.execute(context)
 
-        # SELECT + UPDATE + 2 INSERTs (two data errors) = 4 calls
+        # SELECT + UPDATE + 1 INSERT (validate from XCom, NOT duplicated by state) +
+        # 1 INSERT (execute from state fallback) = 4 calls
         assert mock_conn.execute.call_count == 4
 
     def test_execute_no_integration_id_skips_db(self):
@@ -667,7 +894,7 @@ class TestDispatchScheduledIntegrationsTask:
     @patch("operators.dispatch_operators.create_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
     def test_dispatch_success(self, mock_config, mock_engine_cls, mock_post, mock_auth_headers):
-        """Test successful dispatch of one integration."""
+        """Test successful dispatch of one integration (no integration_run creation)."""
         # Setup config
         config = Mock()
         config.control_plane_db_url = "mysql+pymysql://test"
@@ -700,8 +927,6 @@ class TestDispatchScheduledIntegrationsTask:
         mock_conn.execute.side_effect = execute_side_effect
         mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
         mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
-        mock_engine.begin.return_value.__enter__ = Mock(return_value=mock_conn)
-        mock_engine.begin.return_value.__exit__ = Mock(return_value=False)
 
         # Setup REST API response
         mock_auth_headers.return_value = {"Authorization": "Bearer token"}
@@ -730,6 +955,10 @@ class TestDispatchScheduledIntegrationsTask:
         assert payload["conf"]["s3_bucket"] == "my-bucket"
         assert payload["conf"]["integration_id"] == 1
         assert payload["conf"]["s3_access_key"] == "ak"
+
+        # Verify: only 2 DB calls (find integrations + find auths)
+        # No integration_run creation — that's now PrepareTask's job
+        assert mock_conn.execute.call_count == 2
 
     @patch("operators.dispatch_operators.create_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
@@ -788,8 +1017,6 @@ class TestDispatchScheduledIntegrationsTask:
         mock_conn.execute.side_effect = execute_side_effect
         mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
         mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
-        mock_engine.begin.return_value.__enter__ = Mock(return_value=mock_conn)
-        mock_engine.begin.return_value.__exit__ = Mock(return_value=False)
 
         mock_auth_headers.return_value = {"Authorization": "Bearer token"}
         # First call fails, second succeeds
@@ -857,6 +1084,57 @@ class TestDispatchScheduledIntegrationsTask:
         result = operator.execute({})
 
         assert result["dispatched"] == 0
+
+    @patch("operators.dispatch_operators.create_engine")
+    @patch("operators.dispatch_operators.get_control_plane_config")
+    def test_weekly_dispatches_all_active(self, mock_config, mock_engine_cls):
+        """Weekly dispatcher returns all active weekly integrations (no hour filter)."""
+        config = Mock()
+        config.control_plane_db_url = "mysql+pymysql://test"
+        mock_config.return_value = config
+
+        row1 = self._make_integration_row(integration_id=1, utc_sch_cron="0 3 * * 1")
+        row2 = self._make_integration_row(integration_id=2, utc_sch_cron="0 5 * * 1")
+
+        mock_conn = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine_cls.return_value = mock_engine
+        mock_conn.execute.return_value.fetchall.return_value = [row1, row2]
+        mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
+
+        operator = DispatchScheduledIntegrationsTask(
+            task_id="dispatch", schedule_type="weekly", integration_type="s3_to_mongo"
+        )
+        matched = operator._find_due_integrations(mock_engine)
+
+        # Weekly returns ALL active integrations regardless of cron hour
+        assert len(matched) == 2
+
+    @patch("operators.dispatch_operators.create_engine")
+    @patch("operators.dispatch_operators.get_control_plane_config")
+    def test_monthly_dispatches_all_active(self, mock_config, mock_engine_cls):
+        """Monthly dispatcher returns all active monthly integrations (no hour filter)."""
+        config = Mock()
+        config.control_plane_db_url = "mysql+pymysql://test"
+        mock_config.return_value = config
+
+        row1 = self._make_integration_row(integration_id=1, utc_sch_cron="0 4 1 * *")
+
+        mock_conn = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine_cls.return_value = mock_engine
+        mock_conn.execute.return_value.fetchall.return_value = [row1]
+        mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
+
+        operator = DispatchScheduledIntegrationsTask(
+            task_id="dispatch", schedule_type="monthly", integration_type="s3_to_mongo"
+        )
+        matched = operator._find_due_integrations(mock_engine)
+
+        assert len(matched) == 1
+        assert matched[0].integration_id == 1
 
 
 if __name__ == "__main__":

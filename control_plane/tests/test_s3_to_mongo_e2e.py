@@ -26,7 +26,7 @@ import pytest
 import json
 import time
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 import uuid
@@ -329,9 +329,9 @@ class TestS3ToMongoEndToEnd:
 
         # Create test data
         test_data = [
-            {"id": 1, "name": "Alice", "email": "alice@example.com", "timestamp": datetime.utcnow().isoformat()},
-            {"id": 2, "name": "Bob", "email": "bob@example.com", "timestamp": datetime.utcnow().isoformat()},
-            {"id": 3, "name": "Charlie", "email": "charlie@example.com", "timestamp": datetime.utcnow().isoformat()},
+            {"id": 1, "name": "Alice", "email": "alice@example.com", "timestamp": datetime.now(timezone.utc).isoformat()},
+            {"id": 2, "name": "Bob", "email": "bob@example.com", "timestamp": datetime.now(timezone.utc).isoformat()},
+            {"id": 3, "name": "Charlie", "email": "charlie@example.com", "timestamp": datetime.now(timezone.utc).isoformat()},
         ]
 
         # Upload each record as a separate JSON file
@@ -422,8 +422,8 @@ class TestS3ToMongoEndToEnd:
         print(f"  5. Consumer service is triggering Airflow DAG...")
 
         # Store timestamp before waiting so we only look at DAG runs created after this point
-        from datetime import datetime as dt, timedelta
-        trigger_time = dt.utcnow()
+        from datetime import datetime as dt, timedelta, timezone as tz
+        trigger_time = dt.now(tz.utc)
 
         # Wait for Kafka consumer to process the CDC event and trigger the DAG
         print(f"\n  Waiting for DAG to be triggered (15 seconds)...")

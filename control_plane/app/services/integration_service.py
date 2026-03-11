@@ -4,7 +4,7 @@ import asyncio
 from typing import List, Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 import json
 import requests
@@ -403,7 +403,7 @@ class IntegrationService:
             integration_run = IntegrationRun(
                 integration_id=integration_id,
                 dag_run_id=dag_run_id,
-                execution_date=datetime.utcnow(),
+                execution_date=datetime.now(timezone.utc),
             )
             self.db.add(integration_run)
             await self.db.commit()
@@ -496,12 +496,12 @@ class IntegrationService:
         # Format: <customer_id>_<dag_id>_manual_<timestamp>
         # Extract customer/tenant from conf if available
         tenant_id = conf.get("tenant_id", "unknown")
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")[:17]  # YYYYmmdd_HHMMSS
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:17]  # YYYYmmdd_HHMMSS
         custom_run_id = f"{tenant_id}_{dag_id}_manual_{timestamp}"
 
         payload = {
             "dag_run_id": custom_run_id,
-            "logical_date": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "logical_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "conf": conf,
         }
 

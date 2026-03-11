@@ -43,6 +43,7 @@ with DAG(
 
     dispatch = DispatchScheduledIntegrationsTask(
         task_id="dispatch_integrations",
+        schedule_type="daily",
         schedule_hour=2,
         integration_type="s3_to_mongo",
         doc_md="""

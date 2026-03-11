@@ -9,7 +9,12 @@ ORM-level relationships.  Airflow operators use the Core tables directly for
 synchronous reads/writes via pymysql.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utcnow():
+    """Return timezone-aware UTC datetime for SQLAlchemy column defaults."""
+    return datetime.now(timezone.utc)
 
 from sqlalchemy import (
     MetaData,
@@ -123,8 +128,8 @@ integrations = Table(
     Column("utc_sch_cron", String(100)),
     Column("schedule_type", String(20), default="on_demand"),
     Column("json_data", Text),
-    Column("created_at", DateTime, default=datetime.utcnow, nullable=False),
-    Column("updated_at", DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False),
+    Column("created_at", DateTime, default=_utcnow, nullable=False),
+    Column("updated_at", DateTime, default=_utcnow, onupdate=_utcnow, nullable=False),
 )
 
 # ── integration_runs ─────────────────────────────────────────────────────────
@@ -141,7 +146,7 @@ integration_runs = Table(
         index=True,
     ),
     Column("dag_run_id", String(255), index=True),
-    Column("started", DateTime, default=datetime.utcnow),
+    Column("started", DateTime, default=_utcnow),
     Column("ended", DateTime),
     Column("is_success", Boolean, default=False),
     Column("execution_date", DateTime),
@@ -163,5 +168,5 @@ integration_run_errors = Table(
     Column("error_code", String(100)),
     Column("message", Text),
     Column("task_id", String(255)),
-    Column("timestamp", DateTime, default=datetime.utcnow, nullable=False),
+    Column("timestamp", DateTime, default=_utcnow, nullable=False),
 )

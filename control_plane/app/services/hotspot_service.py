@@ -12,7 +12,7 @@ Use cases:
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 from collections import defaultdict
@@ -107,7 +107,7 @@ class HotspotService:
         """
         async def _execute():
             if start_date is None:
-                current_start_date = datetime.utcnow().replace(
+                current_start_date = datetime.now(timezone.utc).replace(
                     minute=0, second=0, microsecond=0
                 )
             else:

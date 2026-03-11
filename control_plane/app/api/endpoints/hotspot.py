@@ -5,7 +5,7 @@ Provides scheduling hotspot analysis to identify busy periods and
 support capacity planning and jitter strategy (Spec Section 9.3).
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -172,7 +172,7 @@ async def get_hotspot_summary(
     next_hotspot_time = datetime.fromisoformat(
         next_hotspot_data["timestamp"].replace("Z", "+00:00")
     )
-    hours_until = (next_hotspot_time - datetime.utcnow()).total_seconds() / 3600
+    hours_until = (next_hotspot_time - datetime.now(timezone.utc)).total_seconds() / 3600
 
     # Find highest load
     highest_load = max(hotspots, key=lambda h: h["total_dag_runs"])

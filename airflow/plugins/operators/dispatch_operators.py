@@ -11,7 +11,7 @@ IntegrationRun tracking.
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import requests
@@ -22,7 +22,6 @@ from config.airflow_config import get_control_plane_config
 from shared_models.tables import (
     auths as auths_table,
     integrations as integrations_table,
-    integration_runs as integration_runs_table,
 )
 from shared_utils import get_airflow_auth_headers
 
@@ -36,18 +35,22 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
     3. Triggers the ondemand DAG via Airflow REST API
 
     Args:
-        schedule_hour: UTC hour to match (0-23). Integrations with
-            utc_sch_cron hour = schedule_hour are dispatched.
+        schedule_type: One of "daily", "weekly", or "monthly".
+        schedule_hour: UTC hour to match (0-23). Only used for daily
+            dispatchers to select integrations by their cron hour.
+            Ignored for weekly/monthly (the DAG cron controls timing).
         integration_type: Filter by integration_type (e.g., "s3_to_mongo").
     """
 
     def __init__(
         self,
-        schedule_hour: int,
+        schedule_type: str = "daily",
+        schedule_hour: int | None = None,
         integration_type: str = "s3_to_mongo",
         **kwargs,
     ):
         super().__init__(**kwargs)
+        self.schedule_type = schedule_type
         self.schedule_hour = schedule_hour
         self.integration_type = integration_type
 
@@ -63,7 +66,8 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
             integrations = self._find_due_integrations(engine)
             self.log.info(
                 f"Found {len(integrations)} active integration(s) "
-                f"for hour={self.schedule_hour}, type={self.integration_type}"
+                f"for schedule_type={self.schedule_type}, "
+                f"hour={self.schedule_hour}, type={self.integration_type}"
             )
 
             results: List[Dict[str, Any]] = []
@@ -73,7 +77,8 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
                 try:
                     conf = self._build_conf(engine, row)
                     dag_run_id = self._trigger_ondemand_dag(conf, config)
-                    self._create_integration_run(engine, row.integration_id, dag_run_id)
+                    # IntegrationRun record is created by PrepareS3ToMongoTask
+                    # inside the triggered ondemand DAG (single source of truth).
                     results.append({
                         "integration_id": row.integration_id,
                         "dag_run_id": dag_run_id,
@@ -109,25 +114,34 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
     # ------------------------------------------------------------------
 
     def _find_due_integrations(self, engine):
-        """Query integrations that are due for this schedule hour."""
+        """Query integrations that are due for this schedule type.
+
+        - daily: filters by schedule_type='daily' AND cron hour = schedule_hour
+        - weekly/monthly: filters by schedule_type only (the DAG's own cron
+          schedule controls when it runs, so all active integrations of that
+          frequency are dispatched)
+        """
         t = integrations_table
         with engine.connect() as conn:
             rows = conn.execute(
                 select(t).where(
-                    t.c.schedule_type == "daily",
+                    t.c.schedule_type == self.schedule_type,
                     t.c.usr_sch_status == "active",
                     t.c.integration_type == self.integration_type,
-                    t.c.utc_sch_cron.isnot(None),
                 )
             ).fetchall()
 
-        # Filter by hour in Python (more reliable than SQL string matching)
-        matched = []
-        for row in rows:
-            hour = self._extract_hour(row.utc_sch_cron)
-            if hour == self.schedule_hour:
-                matched.append(row)
-        return matched
+        if self.schedule_type == "daily" and self.schedule_hour is not None:
+            # For daily, filter by hour in Python
+            matched = []
+            for row in rows:
+                hour = self._extract_hour(row.utc_sch_cron)
+                if hour == self.schedule_hour:
+                    matched.append(row)
+            return matched
+
+        # For weekly/monthly, return all active integrations of this type
+        return rows
 
     @staticmethod
     def _extract_hour(cron_expr: str) -> int | None:
@@ -192,12 +206,12 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
         airflow_password = config.airflow_password
 
         tenant_id = conf.get("tenant_id", "unknown")
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")[:17]
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:17]
         custom_run_id = f"{tenant_id}_{dag_id}_scheduled_{timestamp}"
 
         payload = {
             "dag_run_id": custom_run_id,
-            "logical_date": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "logical_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
             "conf": conf,
         }
 
@@ -207,14 +221,3 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
         response.raise_for_status()
         return response.json().get("dag_run_id", custom_run_id)
 
-    def _create_integration_run(self, engine, integration_id: int, dag_run_id: str):
-        """Record the dispatched run in the control plane DB."""
-        with engine.begin() as conn:
-            conn.execute(
-                integration_runs_table.insert().values(
-                    integration_id=integration_id,
-                    dag_run_id=dag_run_id,
-                    execution_date=datetime.utcnow(),
-                    started=datetime.utcnow(),
-                )
-            )

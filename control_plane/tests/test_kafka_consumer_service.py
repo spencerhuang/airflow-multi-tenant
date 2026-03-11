@@ -4,7 +4,7 @@ import json
 import time
 import pytest
 from unittest.mock import Mock, patch, MagicMock
-from datetime import datetime
+from datetime import datetime, timezone
 
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
@@ -116,7 +116,7 @@ class TestKafkaConsumerService:
         message = {
             "event_type": "integration.created",
             "event_id": "test-123",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {
                 "integration_id": 1,
                 "tenant_id": "customer_abc",
@@ -147,7 +147,7 @@ class TestKafkaConsumerService:
         message = {
             "event_type": "integration.updated",
             "event_id": "test-456",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {
                 "integration_id": 1,
                 "tenant_id": "customer_abc",
@@ -176,7 +176,7 @@ class TestKafkaConsumerService:
         message = {
             "event_type": "integration.deleted",
             "event_id": "test-789",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {
                 "integration_id": 1,
                 "tenant_id": "customer_abc",
@@ -206,7 +206,7 @@ class TestKafkaConsumerService:
         consumer._process_message({
             "event_type": "integration.run.started",
             "event_id": "run-1",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {"run_id": "run-1", "integration_id": 1},
         })
 
@@ -214,7 +214,7 @@ class TestKafkaConsumerService:
         consumer._process_message({
             "event_type": "integration.run.completed",
             "event_id": "run-2",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {"run_id": "run-2", "integration_id": 1},
         })
 
@@ -222,7 +222,7 @@ class TestKafkaConsumerService:
         consumer._process_message({
             "event_type": "integration.run.failed",
             "event_id": "run-3",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {"run_id": "run-3", "integration_id": 1},
         })
 
@@ -248,7 +248,7 @@ class TestKafkaConsumerService:
         message = {
             "event_type": "unknown.event.type",
             "event_id": "unknown-1",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {},
         }
 
@@ -273,7 +273,7 @@ class TestKafkaConsumerService:
         message = {
             "event_type": "integration.created",
             "event_id": "error-1",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {"integration_id": 1},
         }
 
@@ -300,7 +300,7 @@ class TestKafkaConsumerService:
         message = {
             "event_type": "integration.created",
             "event_id": "custom-1",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {"integration_id": 999},
         }
 
@@ -336,7 +336,7 @@ class TestKafkaConsumerIntegration:
         test_message = {
             "event_type": "integration.created",
             "event_id": f"test-{int(time.time())}",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {
                 "integration_id": 123,
                 "tenant_id": "test_tenant",
@@ -379,19 +379,19 @@ class TestKafkaConsumerIntegration:
             {
                 "event_type": "integration.created",
                 "event_id": f"seq-1-{int(time.time())}",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": {"integration_id": 1},
             },
             {
                 "event_type": "integration.updated",
                 "event_id": f"seq-2-{int(time.time())}",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": {"integration_id": 1},
             },
             {
                 "event_type": "integration.run.started",
                 "event_id": f"seq-3-{int(time.time())}",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": {"run_id": "run-1", "integration_id": 1},
             },
         ]
@@ -600,7 +600,7 @@ class TestKafkaConsumerDLQ:
         test_message = {
             "event_type": "integration.created",
             "event_id": f"dlq-test-{int(time.time())}",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {"integration_id": 999},
         }
 
@@ -648,33 +648,28 @@ class TestKafkaConsumerDLQ:
             enable_dlq=True,
         )
 
-        # Start consumer to initialize DLQ producer
-        consumer.start()
-        time.sleep(2)
-
         test_message = {
             "event_type": "integration.created",
             "event_id": "format-test",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "data": {"integration_id": 456},
         }
 
         test_error = ValueError("Test error message")
 
-        # Mock the DLQ producer send to capture the message
+        # Mock the DLQ producer to capture sent messages
         sent_messages = []
-        original_send = consumer.dlq_producer.send
+        mock_producer = MagicMock()
 
         def mock_send(topic, key, value):
             sent_messages.append(value)
             return MagicMock()
 
-        consumer.dlq_producer.send = mock_send
+        mock_producer.send = mock_send
+        consumer.dlq_producer = mock_producer
 
         # Send to DLQ
         consumer._send_to_dlq(test_message, test_error, 3)
-
-        consumer.stop()
 
         # Verify message format
         assert len(sent_messages) == 1
@@ -719,19 +714,19 @@ class TestKafkaConsumerDLQ:
             {
                 "event_type": "integration.created",
                 "event_id": f"good-1-{int(time.time())}",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": {"integration_id": 1},
             },
             {
                 "event_type": "integration.created",
                 "event_id": f"bad-{int(time.time())}",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": {"integration_id": fail_integration_id},
             },
             {
                 "event_type": "integration.created",
                 "event_id": f"good-2-{int(time.time())}",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": {"integration_id": 2},
             },
         ]
