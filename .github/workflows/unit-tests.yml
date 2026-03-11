@@ -48,4 +48,6 @@ jobs:
 
       - name: Run airflow tests
         if: matrix.component == 'airflow'
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/airflow/plugins
         run: pytest airflow/tests/ -v --tb=short
