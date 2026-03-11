@@ -1,0 +1,51 @@
+name: Unit Tests without Containers
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component:
+          - connectors
+          - control_plane
+          - airflow
+
+    name: ${{ matrix.component }} tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-test.txt
+
+      - name: Run connectors tests
+        if: matrix.component == 'connectors'
+        run: pytest connectors/tests/ -v --tb=short
+
+      - name: Run control plane tests
+        if: matrix.component == 'control_plane'
+        run: |
+          pytest control_plane/tests/ -v --tb=short \
+            --ignore=control_plane/tests/test_integration_api_live.py \
+            --ignore=control_plane/tests/test_cdc_kafka.py \
+            --ignore=control_plane/tests/test_debezium_cdc.py \
+            --ignore=control_plane/tests/test_s3_to_mongo_e2e.py \
+            --ignore=control_plane/tests/test_cron_scheduled_e2e.py
+
+      - name: Run airflow tests
+        if: matrix.component == 'airflow'
+        run: pytest airflow/tests/ -v --tb=short

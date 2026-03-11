@@ -236,9 +236,11 @@ class TestIntegrationService:
         dag_id = service._get_dag_id_for_integration(sample_integration)
         assert dag_id == "s3_to_mongo_ondemand"
 
+    @patch("control_plane.app.services.integration_service.get_airflow_auth_headers")
     @patch("control_plane.app.services.integration_service.requests.post")
-    def test_trigger_airflow_dag_success(self, mock_post, service):
+    def test_trigger_airflow_dag_success(self, mock_post, mock_auth_headers, service):
         """Test triggering Airflow DAG successfully."""
+        mock_auth_headers.return_value = {"Authorization": "Bearer token", "Content-Type": "application/json"}
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"dag_run_id": "manual__2024-01-01T00:00:00"}
@@ -249,10 +251,12 @@ class TestIntegrationService:
         assert dag_run_id == "manual__2024-01-01T00:00:00"
         mock_post.assert_called_once()
 
+    @patch("control_plane.app.services.integration_service.get_airflow_auth_headers")
     @patch("control_plane.app.services.integration_service.requests.post")
-    def test_trigger_airflow_dag_failure(self, mock_post, service):
+    def test_trigger_airflow_dag_failure(self, mock_post, mock_auth_headers, service):
         """Test triggering Airflow DAG with failure."""
         import requests
+        mock_auth_headers.return_value = {"Authorization": "Bearer token", "Content-Type": "application/json"}
         mock_post.side_effect = requests.exceptions.RequestException("Connection failed")
 
         with pytest.raises(Exception) as exc_info:
@@ -261,9 +265,12 @@ class TestIntegrationService:
         assert "Failed to trigger Airflow DAG" in str(exc_info.value)
 
     @pytest.mark.asyncio
+    @patch("control_plane.app.services.integration_service.get_airflow_auth_headers")
     @patch("control_plane.app.services.integration_service.requests.post")
-    async def test_trigger_dag_run_success(self, mock_post, service, mock_db, sample_integration):
+    async def test_trigger_dag_run_success(self, mock_post, mock_auth_headers, service, mock_db, sample_integration):
         """Test full trigger_dag_run flow."""
+        mock_auth_headers.return_value = {"Authorization": "Bearer token", "Content-Type": "application/json"}
+
         # Mock get_integration
         mock_result = MagicMock()
         scalar_result = MagicMock()
