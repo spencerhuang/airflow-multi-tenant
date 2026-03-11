@@ -401,6 +401,105 @@ docker exec kafka kafka-consumer-groups \
   --group control-plane-consumer
 ```
 
+## Error Tracking: XCom-Based Pipeline Error Capture
+
+### How It Works
+
+Airflow pipeline tasks (Prepare, Validate, Execute) capture errors and push them to XCom using the shared utility `push_task_errors()` from `shared_utils.task_error_tracking`. The CleanUp task (which runs with `trigger_rule=ALL_DONE`, i.e. always) collects all errors and persists them to the `integration_run_errors` table.
+
+```
+Prepare/Validate/Execute tasks
+  ↓ (on error)
+  push_task_errors(ti, task_id, errors)
+    → XCom key: "task_errors_{task_id}"
+    → Structured: [{task_id, error_code, message}, ...]
+  ↓
+CleanUp task (always runs)
+  ↓
+  pull_all_task_errors(ti, ["prepare", "validate", "execute"])
+    → Collects all XCom error records
+  ↓
+  Fallback: check task instance states for tasks with no XCom errors
+    → Generates generic error from state (e.g. "Task validate ended in state: failed")
+    → Deduplicates: skips tasks already covered by XCom errors
+  ↓
+  INSERT INTO integration_run_errors (run_id, error_code, message, task_id, timestamp)
+  UPDATE integration_runs SET ended=now, is_success=(no errors)
+```
+
+### XCom Space Limits
+
+XCom has limited storage, so error messages are truncated and capped:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `MAX_ERROR_MESSAGE_LENGTH` | 2,000 chars | Truncates individual error messages |
+| `MAX_ERRORS_PER_TASK` | 20 errors | Caps number of errors per task |
+
+These constants are defined in `packages/shared_utils/shared_utils/task_error_tracking.py`.
+
+### Error Types by Task
+
+| Task | Error Code | When |
+|---|---|---|
+| Prepare | `PREPARE_ERROR` | Missing config (s3_bucket, mongo_collection), DB failures |
+| Validate | `VALIDATION_ERROR` | S3 bucket inaccessible, MongoDB connection failed |
+| Execute | `DATA_ERROR` | Per-file JSON parse errors, write failures (non-fatal, continues) |
+| Execute | `EXECUTE_ERROR` | Fatal exception during execution |
+
+### IntegrationRun Lifecycle
+
+1. **PrepareTask** calls `create_integration_run()` (from `shared_utils`) **before** any validation — guarantees the row exists even if Prepare fails
+2. **CleanUpTask** updates the same row with `ended`, `is_success`, and inserts error records
+
+### Key Files
+
+- `packages/shared_utils/shared_utils/task_error_tracking.py` — `push_task_errors()`, `pull_all_task_errors()`
+- `packages/shared_utils/shared_utils/integration_run.py` — `create_integration_run()`
+- `airflow/plugins/operators/s3_to_mongo_operators.py` — Prepare/Validate/Execute/CleanUp implementations
+
+---
+
+## SQLAlchemy Version Strategy
+
+### The Problem
+
+The project has two distinct SQLAlchemy consumers with different runtime environments:
+
+| Component | SQLAlchemy Version | API Style | Connection |
+|---|---|---|---|
+| **Control Plane** (FastAPI) | 2.0.25 | Async ORM (`AsyncSession`, `select()`) | `asyncpg` / `aiomysql` |
+| **Airflow Operators** | 2.0.25 (via Airflow 3.0) | Sync Core (`engine.connect()`, `engine.begin()`) | `pymysql` |
+
+### Solution: `shared_models` with Core Tables
+
+The `packages/shared_models` package defines tables using **SQLAlchemy Core** (`Table`, `Column`, `MetaData`) — the lowest-common-denominator API that works identically across SQLAlchemy 1.4 and 2.0, sync and async.
+
+```
+shared_models/tables.py  (Core tables — works everywhere)
+  ↑                        ↑
+  │                        │
+Control Plane ORM         Airflow Operators
+(maps via __table__)      (uses Core directly)
+(SQLAlchemy 2.0 async)    (SQLAlchemy 2.0 sync)
+```
+
+### Dependency Constraint
+
+`shared_models` declares a broad dependency to support both:
+```toml
+# packages/shared_models/pyproject.toml
+dependencies = ["sqlalchemy>=1.4,<3"]
+```
+
+### Why Core Tables, Not ORM Models
+
+- ORM models (`DeclarativeBase`, `relationship()`) require the ORM layer and session management, which differs between async (Control Plane) and sync (Airflow)
+- Core tables (`Table()`, `Column()`) are pure schema definitions with zero runtime assumptions
+- The Control Plane wraps Core tables with ORM models that add `relationship()` for convenience; Airflow operators use the Core tables directly with `conn.execute(table.insert().values(...))`
+
+---
+
 ## Summary
 
 ✅ **Implemented**: Production-ready Kafka consumer service

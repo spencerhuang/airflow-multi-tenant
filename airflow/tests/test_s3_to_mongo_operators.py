@@ -217,16 +217,10 @@ class TestPrepareS3ToMongoTask:
         with pytest.raises(ValueError):
             operator.execute(context)
 
-    @patch("operators.s3_to_mongo_operators.create_engine")
-    def test_execute_creates_integration_run(self, mock_create_engine):
-        """Test that Prepare creates an IntegrationRun record in the control plane DB."""
+    @patch("operators.s3_to_mongo_operators.create_integration_run")
+    def test_execute_creates_integration_run(self, mock_create_run):
+        """Test that Prepare calls create_integration_run with correct args."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
-
-        mock_conn = MagicMock()
-        mock_engine = MagicMock()
-        mock_create_engine.return_value = mock_engine
-        mock_engine.begin.return_value.__enter__ = Mock(return_value=mock_conn)
-        mock_engine.begin.return_value.__exit__ = Mock(return_value=False)
 
         context = _make_prepare_context({
             "integration_id": 42,
@@ -234,16 +228,14 @@ class TestPrepareS3ToMongoTask:
             "mongo_collection": "test_collection",
         }, run_id="ws1_s3_to_mongo_ondemand_scheduled_20260310_0200")
 
-        with patch.dict(os.environ, {"CONTROL_PLANE_DB_URL": "mysql+pymysql://test"}):
-            result = operator.execute(context)
+        result = operator.execute(context)
 
         assert result["integration_id"] == 42
 
-        # Verify INSERT was called on integration_runs
-        mock_conn.execute.assert_called_once()
-        insert_call = mock_conn.execute.call_args[0][0]
-        # The insert statement targets integration_runs table
-        assert "integration_runs" in str(insert_call)
+        # Verify create_integration_run was called with correct args
+        mock_create_run.assert_called_once_with(
+            42, "ws1_s3_to_mongo_ondemand_scheduled_20260310_0200", log=operator.log,
+        )
 
     def test_execute_skips_integration_run_without_db_url(self):
         """Test that Prepare skips IntegrationRun creation when no DB URL."""
@@ -274,16 +266,10 @@ class TestPrepareS3ToMongoTask:
         result = operator.execute(context)
         assert result["integration_id"] is None
 
-    @patch("operators.s3_to_mongo_operators.create_engine")
-    def test_execute_creates_integration_run_even_on_failure(self, mock_create_engine):
+    @patch("operators.s3_to_mongo_operators.create_integration_run")
+    def test_execute_creates_integration_run_even_on_failure(self, mock_create_run):
         """Test that IntegrationRun is created even when validation fails."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
-
-        mock_conn = MagicMock()
-        mock_engine = MagicMock()
-        mock_create_engine.return_value = mock_engine
-        mock_engine.begin.return_value.__enter__ = Mock(return_value=mock_conn)
-        mock_engine.begin.return_value.__exit__ = Mock(return_value=False)
 
         # Has integration_id but missing s3_bucket — validation will fail
         context = _make_prepare_context({
@@ -291,14 +277,11 @@ class TestPrepareS3ToMongoTask:
             "mongo_collection": "test_collection",
         })
 
-        with patch.dict(os.environ, {"CONTROL_PLANE_DB_URL": "mysql+pymysql://test"}):
-            with pytest.raises(ValueError, match="s3_bucket is required"):
-                operator.execute(context)
+        with pytest.raises(ValueError, match="s3_bucket is required"):
+            operator.execute(context)
 
         # IntegrationRun should still have been created before the error
-        mock_conn.execute.assert_called_once()
-        insert_call = mock_conn.execute.call_args[0][0]
-        assert "integration_runs" in str(insert_call)
+        mock_create_run.assert_called_once_with(42, "test_run_123", log=operator.log)
 
 
 class TestValidateS3ToMongoTask:
@@ -569,7 +552,7 @@ class TestCleanUpS3ToMongoTask:
 
         return {"ti": mock_ti, "dag_run": mock_dag_run}
 
-    @patch("operators.s3_to_mongo_operators.create_engine")
+    @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
     def test_execute_success_updates_db(self, mock_create_engine):
         """Test cleanup updates IntegrationRun on success (no errors in XCom)."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
@@ -598,7 +581,7 @@ class TestCleanUpS3ToMongoTask:
         # Verify commit was called
         mock_conn.commit.assert_called_once()
 
-    @patch("operators.s3_to_mongo_operators.create_engine")
+    @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
     def test_execute_records_xcom_errors(self, mock_create_engine):
         """Test cleanup persists detailed errors from XCom to integration_run_errors."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
@@ -634,7 +617,7 @@ class TestCleanUpS3ToMongoTask:
         # 1 INSERT (execute state fallback, since no XCom error for execute) = 4 calls
         assert mock_conn.execute.call_count == 4
 
-    @patch("operators.s3_to_mongo_operators.create_engine")
+    @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
     def test_execute_records_data_errors_from_xcom(self, mock_create_engine):
         """Test cleanup records data-level errors pushed by Execute task."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
@@ -666,7 +649,7 @@ class TestCleanUpS3ToMongoTask:
         # SELECT + UPDATE + 2 INSERTs (two data errors from XCom) = 4 calls
         assert mock_conn.execute.call_count == 4
 
-    @patch("operators.s3_to_mongo_operators.create_engine")
+    @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
     def test_execute_state_fallback_when_no_xcom_errors(self, mock_create_engine):
         """Test that task state is used as fallback when XCom errors are absent."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
@@ -697,7 +680,7 @@ class TestCleanUpS3ToMongoTask:
         # SELECT + UPDATE + 2 INSERTs (validate failed + execute upstream_failed) = 4 calls
         assert mock_conn.execute.call_count == 4
 
-    @patch("operators.s3_to_mongo_operators.create_engine")
+    @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
     def test_execute_no_duplicate_errors_from_xcom_and_state(self, mock_create_engine):
         """Test that errors from XCom don't get duplicated by state fallback."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
@@ -763,7 +746,7 @@ class TestCleanUpS3ToMongoTask:
             # Should not raise — just logs warning
             operator.execute(context)
 
-    @patch("operators.s3_to_mongo_operators.create_engine")
+    @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
     def test_execute_no_integration_run_record(self, mock_create_engine):
         """Test cleanup handles missing IntegrationRun record gracefully."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
@@ -823,7 +806,7 @@ class TestCleanUpS3ToMongoTask:
         mock_session.query.assert_called()
         mock_session.commit.assert_called()
 
-    @patch("operators.s3_to_mongo_operators.create_engine")
+    @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
     def test_execute_db_error_does_not_fail_cleanup(self, mock_create_engine):
         """Test that DB errors don't cause cleanup task to fail."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
@@ -891,7 +874,7 @@ class TestDispatchScheduledIntegrationsTask:
 
     @patch("operators.dispatch_operators.get_airflow_auth_headers")
     @patch("operators.dispatch_operators.requests.post")
-    @patch("operators.dispatch_operators.create_engine")
+    @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
     def test_dispatch_success(self, mock_config, mock_engine_cls, mock_post, mock_auth_headers):
         """Test successful dispatch of one integration (no integration_run creation)."""
@@ -960,7 +943,7 @@ class TestDispatchScheduledIntegrationsTask:
         # No integration_run creation — that's now PrepareTask's job
         assert mock_conn.execute.call_count == 2
 
-    @patch("operators.dispatch_operators.create_engine")
+    @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
     def test_dispatch_no_matching_integrations(self, mock_config, mock_engine_cls):
         """Test dispatch returns empty when no integrations match."""
@@ -985,7 +968,7 @@ class TestDispatchScheduledIntegrationsTask:
 
     @patch("operators.dispatch_operators.get_airflow_auth_headers")
     @patch("operators.dispatch_operators.requests.post")
-    @patch("operators.dispatch_operators.create_engine")
+    @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
     def test_dispatch_continues_on_error(self, mock_config, mock_engine_cls, mock_post, mock_auth_headers):
         """Test that one integration failing doesn't stop others."""
@@ -1044,7 +1027,7 @@ class TestDispatchScheduledIntegrationsTask:
         assert DispatchScheduledIntegrationsTask._extract_hour("bad cron") is None
         assert DispatchScheduledIntegrationsTask._extract_hour("") is None
 
-    @patch("operators.dispatch_operators.create_engine")
+    @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
     def test_dispatch_filters_by_hour(self, mock_config, mock_engine_cls):
         """Test that only integrations matching the schedule hour are dispatched."""
@@ -1085,7 +1068,7 @@ class TestDispatchScheduledIntegrationsTask:
 
         assert result["dispatched"] == 0
 
-    @patch("operators.dispatch_operators.create_engine")
+    @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
     def test_weekly_dispatches_all_active(self, mock_config, mock_engine_cls):
         """Weekly dispatcher returns all active weekly integrations (no hour filter)."""
@@ -1111,7 +1094,7 @@ class TestDispatchScheduledIntegrationsTask:
         # Weekly returns ALL active integrations regardless of cron hour
         assert len(matched) == 2
 
-    @patch("operators.dispatch_operators.create_engine")
+    @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
     def test_monthly_dispatches_all_active(self, mock_config, mock_engine_cls):
         """Monthly dispatcher returns all active monthly integrations (no hour filter)."""

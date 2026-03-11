@@ -16,14 +16,14 @@ from typing import Any, Dict, List
 
 import requests
 from airflow.sdk import BaseOperator
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 
 from config.airflow_config import get_control_plane_config
 from shared_models.tables import (
     auths as auths_table,
     integrations as integrations_table,
 )
-from shared_utils import get_airflow_auth_headers
+from shared_utils import get_airflow_auth_headers, create_control_plane_engine
 
 
 class DispatchScheduledIntegrationsTask(BaseOperator):
@@ -61,7 +61,7 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
             self.log.warning("CONTROL_PLANE_DB_URL not set; nothing to dispatch")
             return {"dispatched": 0, "errors": 0, "results": []}
 
-        engine = create_engine(db_url)
+        engine = create_control_plane_engine(db_url)
         try:
             integrations = self._find_due_integrations(engine)
             self.log.info(

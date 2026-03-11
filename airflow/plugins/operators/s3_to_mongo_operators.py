@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from airflow.sdk import BaseOperator
 from airflow.models import XCom
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 
 # Use relative import within plugins directory
 from operators.base_operators import PrepareTask, ValidateTask, CleanUpTask
@@ -25,8 +25,13 @@ from shared_models.tables import (
     integration_run_errors as integration_run_errors_table,
 )
 
-# Shared error tracking utilities
-from shared_utils import push_task_errors, pull_all_task_errors
+# Shared utilities
+from shared_utils import (
+    push_task_errors,
+    pull_all_task_errors,
+    create_integration_run,
+    create_control_plane_engine,
+)
 
 
 class PrepareS3ToMongoTask(PrepareTask):
@@ -63,7 +68,7 @@ class PrepareS3ToMongoTask(PrepareTask):
 
         # Create IntegrationRun record FIRST — must exist before any logic
         # that could fail, so CleanUp always has a row to update.
-        self._create_integration_run(integration_id, dag_run.run_id)
+        create_integration_run(integration_id, dag_run.run_id, log=self.log)
 
         try:
             # Extract configuration
@@ -106,37 +111,6 @@ class PrepareS3ToMongoTask(PrepareTask):
                 {"error_code": "PREPARE_ERROR", "message": str(e)},
             ], log=self.log)
             raise
-
-    def _create_integration_run(self, integration_id: Any, dag_run_id: str) -> None:
-        """Create an IntegrationRun record in the control plane DB."""
-        if integration_id is None:
-            self.log.info("No integration_id; skipping IntegrationRun creation")
-            return
-
-        db_url = os.environ.get("CONTROL_PLANE_DB_URL")
-        if not db_url:
-            self.log.warning("CONTROL_PLANE_DB_URL not set; skipping IntegrationRun creation")
-            return
-
-        try:
-            engine = create_engine(db_url)
-            with engine.begin() as conn:
-                conn.execute(
-                    integration_runs_table.insert().values(
-                        integration_id=integration_id,
-                        dag_run_id=dag_run_id,
-                        execution_date=datetime.now(timezone.utc),
-                        started=datetime.now(timezone.utc),
-                    )
-                )
-            engine.dispose()
-            self.log.info(
-                f"Created IntegrationRun for integration_id={integration_id}, "
-                f"dag_run_id={dag_run_id}"
-            )
-        except Exception as e:
-            self.log.error(f"Failed to create IntegrationRun: {e}")
-
 
 class ValidateS3ToMongoTask(ValidateTask):
     """
@@ -507,7 +481,7 @@ class CleanUpS3ToMongoTask(CleanUpTask):
 
             is_success = len(upstream_errors) == 0
 
-            engine = create_engine(db_url)
+            engine = create_control_plane_engine(db_url)
 
             with engine.connect() as conn:
                 # Find the IntegrationRun record by dag_run_id

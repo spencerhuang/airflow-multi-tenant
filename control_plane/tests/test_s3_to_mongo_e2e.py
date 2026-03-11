@@ -433,13 +433,18 @@ class TestS3ToMongoEndToEnd:
         dag_id = "s3_to_mongo_ondemand"
 
         print(f"\n  Checking Airflow for DAG runs created after {trigger_time.isoformat()}...")
-        # Filter DAG runs to only those created in the last 30 seconds
-        min_start_time = (trigger_time - timedelta(seconds=10)).isoformat() + "Z"
-        list_url = f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns?start_date_gte={min_start_time}&order_by=-start_date"
+
+        # Airflow 3 /api/v2: use logical_date_gte and order_by=-logical_date
+        # (start_date_gte and order_by=-start_date are Airflow 2 parameters)
+        min_logical_date = (trigger_time - timedelta(seconds=10)).isoformat() + "Z"
+        list_url = f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns"
 
         try:
             headers = get_airflow_auth_headers()
-            response = requests.get(list_url, headers=headers, timeout=10)
+            response = requests.get(
+                list_url, headers=headers, timeout=10,
+                params={"logical_date_gte": min_logical_date, "order_by": "-logical_date"},
+            )
 
             if response.status_code == 200:
                 dag_runs = response.json().get("dag_runs", [])
@@ -452,7 +457,7 @@ class TestS3ToMongoEndToEnd:
                     print(f"  ✓ Found DAG run triggered by CDC event")
                     print(f"  ✓ DAG Run ID: {dag_run_id}")
                     print(f"  ✓ State: {latest_run.get('state')}")
-                    print(f"  ✓ Start Date: {latest_run.get('start_date')}")
+                    print(f"  ✓ Logical Date: {latest_run.get('logical_date')}")
 
                     # Store dag_run_id for next test
                     TestS3ToMongoEndToEnd.dag_run_id = dag_run_id

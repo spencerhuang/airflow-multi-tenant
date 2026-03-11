@@ -9,6 +9,8 @@ from shared_utils.task_error_tracking import (
     MAX_ERROR_MESSAGE_LENGTH,
     MAX_ERRORS_PER_TASK,
 )
+from shared_utils.integration_run import create_integration_run
+from shared_utils.db import create_control_plane_engine, DEFAULT_DB_CONNECT_TIMEOUT
 
 __all__ = [
     "TimezoneConverter",
@@ -18,4 +20,7 @@ __all__ = [
     "TASK_ERRORS_XCOM_KEY",
     "MAX_ERROR_MESSAGE_LENGTH",
     "MAX_ERRORS_PER_TASK",
+    "create_integration_run",
+    "create_control_plane_engine",
+    "DEFAULT_DB_CONNECT_TIMEOUT",
 ]
