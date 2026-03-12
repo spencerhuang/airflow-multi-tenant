@@ -11,6 +11,22 @@ You discovered there was **no production Kafka consumer code** in the control pl
 
 ## What Was Delivered
 
+### 0. Design Decision  ✅
+
+Airflow 3.1.7 now offers a stable Kafka Message Queue Trigger with stable Kafka Provider v1.12.0 starting Feb 2026. However,
+### ⚖️ Technical Verdict: Airflow 3 Kafka Trigger vs. Custom Consumer Service
+
+| Capability | Airflow 3 Kafka Trigger | Custom Consumer Microservice |
+| :--- | :--- | :--- |
+| **Primary Role** | **Orchestration Signaling**: "Wake up and start work." | **Stream Processing**: High-volume data movement/transformation. |
+| **Offset Management** | ⚠️ **Basic**: Relies on Auto-commit; lacks granular consumer-group state management. | ✅ **Robust**: Supports manual commits and precise offset tracking. |
+| **Delivery Guarantee** | **At-Most-Once / At-Least-Once**: Risk of message loss or double-triggering during crashes. | ✅ **Exactly-Once**: Possible via Kafka Transactional API and idempotent producers. |
+| **Throughput** | ⚠️ **Moderate**: Limited by the `asyncio` event loop capacity of the Triggerer process. | ✅ **Ultra-High**: Horizontally scalable to millions of events/sec. |
+| **Error Handling (DLQ)** | ❌ **Manual**: No native DLQ; must be custom-coded in `apply_function`. | ✅ **Native**: Standard patterns available via libraries (e.g., Spring/Confluent). |
+| **Retry Policy** | ❌ **Minimal**: No native backoff/re-queueing at the trigger level. | ✅ **Sophisticated**: Built-in exponential backoff and retry-topic routing. |
+| **Operational Effort** | ✅ **Low**: Managed within Airflow; no extra infra/health-checks needed. | ❌ **High**: Requires separate CI/CD, K8s manifests, and monitoring. |
+
+
 ### 1. Production Kafka Consumer Service ✅
 
 **File**: [control_plane/app/services/kafka_consumer_service.py](control_plane/app/services/kafka_consumer_service.py)
