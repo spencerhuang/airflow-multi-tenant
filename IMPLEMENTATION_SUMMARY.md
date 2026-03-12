@@ -1,14 +1,5 @@
 # Implementation Summary: Kafka Consumer Service
 
-## What You Asked For
-
-> "where's the code in control plane deque message from kafka?"
-
-You discovered there was **no production Kafka consumer code** in the control plane - only test code existed. You then requested:
-
-1. Add tests for `kafka_consumer_service`
-2. Update `test_s3_to_mongo_e2e.py` so DAG triggering is done by `kafka_consumer_service` (not direct API calls)
-
 ## What Was Delivered
 
 ### 0. Design Decision  ✅
