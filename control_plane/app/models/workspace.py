@@ -23,4 +23,4 @@ class Workspace(Base):
     # Relationships
     customer = relationship("Customer", back_populates="workspaces")
     auths = relationship("Auth", back_populates="workspace", cascade="all, delete-orphan")
-    integrations = relationship("Integration", back_populates="workspace")
+    integrations = relationship("Integration", back_populates="workspace", cascade="all, delete-orphan")

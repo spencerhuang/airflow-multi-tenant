@@ -14,6 +14,9 @@ flake8==7.0.0
 mypy==1.8.0
 isort==5.13.2
 
+# Build and release
+pip-tools==7.5.3
+
 # Development
 ipython==8.21.0
 python-dotenv==1.0.1

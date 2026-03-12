@@ -98,7 +98,7 @@ services:
 
   # MinIO (S3-compatible object storage)
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: minio
     command: server /data --console-address ":9001"
     environment:
@@ -176,7 +176,7 @@ services:
 
   # Kafka UI (for monitoring Kafka topics, messages, consumer groups)
   kafka-ui:
-    image: provectuslabs/kafka-ui:latest
+    image: provectuslabs/kafka-ui:v0.7.2
     container_name: kafka-ui
     depends_on:
       - kafka

@@ -1,5 +1,10 @@
 FROM python:3.11-slim
 
+LABEL org.opencontainers.image.title="airflow-multi-tenant-control-plane"
+LABEL org.opencontainers.image.version="0.1.0"
+LABEL org.opencontainers.image.description="Control Plane service for multi-tenant Airflow"
+LABEL org.opencontainers.image.licenses="MIT"
+
 WORKDIR /app
 
 # Install system dependencies
@@ -9,12 +14,9 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements (control plane specific - no Airflow)
-COPY requirements-control-plane.txt .
-
-# Copy requirements and install dependencies
-COPY requirements-control-plane.txt /app/
-RUN pip install --no-cache-dir -r /app/requirements-control-plane.txt
+# Copy locked requirements and install dependencies (control plane specific - no Airflow)
+COPY requirements-control-plane-lock.txt /app/
+RUN pip install --no-cache-dir --require-hashes -r /app/requirements-control-plane-lock.txt
 
 # Copy shared packages (single source of truth for models and utilities)
 COPY packages/shared_models/shared_models /app/shared_models

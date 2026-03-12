@@ -1,4 +1,4 @@
-.PHONY: help install test lint format clean docker-up docker-down setup
+.PHONY: help install test lint format clean docker-up docker-down setup lock lock-upgrade
 
 help:
 	@echo "Available commands:"
@@ -10,6 +10,8 @@ help:
 	@echo "  make docker-up    - Start all Docker services"
 	@echo "  make docker-down  - Stop all Docker services"
 	@echo "  make setup        - Initial setup (install + env file)"
+	@echo "  make lock         - Generate locked requirements files"
+	@echo "  make lock-upgrade - Regenerate lock files with latest versions"
 
 install:
 	pip install -r requirements-dev.txt
@@ -52,6 +54,14 @@ setup:
 	cp .env.example .env
 	pip install -r requirements-dev.txt
 	@echo "Setup complete! Edit .env file with your configuration."
+
+lock:
+	pip-compile --generate-hashes --allow-unsafe --output-file requirements-lock.txt requirements.txt
+	pip-compile --generate-hashes --allow-unsafe --output-file requirements-control-plane-lock.txt requirements-control-plane.txt
+
+lock-upgrade:
+	pip-compile --generate-hashes --allow-unsafe --upgrade --output-file requirements-lock.txt requirements.txt
+	pip-compile --generate-hashes --allow-unsafe --upgrade --output-file requirements-control-plane-lock.txt requirements-control-plane.txt
 
 # Quick start for local development
 dev:

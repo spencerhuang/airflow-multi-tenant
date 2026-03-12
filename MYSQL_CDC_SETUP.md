@@ -463,3 +463,4 @@ type: Opaque
 For more information, see:
 - [Debezium MySQL Connector Documentation](https://debezium.io/documentation/reference/stable/connectors/mysql.html)
 - [DEBEZIUM_CDC_IMPLEMENTATION.md](DEBEZIUM_CDC_IMPLEMENTATION.md) - Complete CDC implementation guide
+- [IMPLEMENTATION_SUMMARY.md — Database Schema Management](IMPLEMENTATION_SUMMARY.md#database-schema-management-alembic-migrations) - Alembic migration workflow for schema changes

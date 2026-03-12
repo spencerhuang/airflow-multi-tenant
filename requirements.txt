@@ -1,6 +1,7 @@
 # NOTE: This file contains ALL dependencies including Airflow.
 # For control plane only (no Airflow), use: requirements-control-plane.txt
 # For testing only (no Airflow), use: requirements-test.txt
+# To generate locked files: make lock
 
 # Airflow 3.0 (supports SQLAlchemy 2.0)
 apache-airflow==3.0.6
@@ -11,42 +12,43 @@ apache-airflow-providers-mongo>=5.0.0
 apache-airflow-providers-mysql>=6.0.0
 
 # FastAPI and web framework
-fastapi==0.109.2
-uvicorn[standard]==0.27.1
-pydantic==2.6.1
-pydantic-settings==2.1.0
+fastapi==0.128.0
+uvicorn[standard]==0.40.0
+pydantic==2.12.5
+pydantic-settings==2.12.0
 
 # Database
-# NOTE: Airflow 3.0 supports SQLAlchemy 2.0
-sqlalchemy==2.0.25
+# NOTE: Airflow 3.0.6 core requires SQLAlchemy <2.0
+# Control plane uses SQLAlchemy 2.0 independently (see requirements-control-plane.txt)
+sqlalchemy>=1.4.49,<2.0
 alembic==1.13.1
-pymysql==1.1.0
+pymysql==1.1.2
 greenlet==3.0.3
-cryptography==42.0.2
+cryptography==46.0.4
 
 # AWS
-boto3==1.34.41
-botocore==1.34.41
+boto3==1.42.41
+botocore==1.42.41
 
 # Azure
-azure-storage-blob==12.19.0
-azure-identity==1.15.0
+azure-storage-blob==12.28.0
+azure-identity==1.25.1
 
 # MongoDB
-pymongo==4.6.1
+pymongo==4.16.0
 
 # Kafka/CDC
-kafka-python==2.0.2
+kafka-python==2.3.0
 
 # Authentication
-python-jose[cryptography]==3.3.0
+python-jose[cryptography]==3.5.0
 passlib[bcrypt]==1.7.4
-python-multipart==0.0.9
+python-multipart==0.0.22
 
 # Scheduling
 APScheduler==3.10.4
 pytz==2024.1
 
 # Utilities
-python-dateutil==2.8.2
-croniter==2.0.1
+python-dateutil==2.9.0.post0
+croniter==2.0.2
