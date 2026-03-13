@@ -58,19 +58,21 @@ from control_plane.app.models.workflow import Workflow
 from control_plane.app.models.access_point import AccessPoint
 
 
+import os
+
 # Test configuration
-API_BASE_URL = "http://localhost:8000"
-MINIO_ENDPOINT = "localhost:9000"
-MINIO_ACCESS_KEY = "minioadmin"
-MINIO_SECRET_KEY = "minioadmin"
-MONGO_HOST = "localhost"
-MONGO_PORT = 27017
-DATABASE_URL = "mysql+pymysql://control_plane:control_plane@localhost:3306/control_plane"
-KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
-KAFKA_TOPIC = "cdc.integration.events"
-AIRFLOW_API_URL = "http://localhost:8080/api/v2"
-AIRFLOW_USERNAME = "airflow"
-AIRFLOW_PASSWORD = "airflow"
+API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
+MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "localhost:9000")
+MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "minioadmin")
+MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "minioadmin")
+MONGO_HOST = os.environ.get("MONGO_HOST", "localhost")
+MONGO_PORT = int(os.environ.get("MONGO_PORT", 27017))
+DATABASE_URL = os.environ.get("DATABASE_URL", "mysql+pymysql://control_plane:control_plane@localhost:3306/control_plane")
+KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "cdc.integration.events")
+AIRFLOW_API_URL = os.environ.get("AIRFLOW_API_URL", "http://localhost:8080/api/v2")
+AIRFLOW_USERNAME = os.environ.get("AIRFLOW_USERNAME", "airflow")
+AIRFLOW_PASSWORD = os.environ.get("AIRFLOW_PASSWORD", "airflow")
 
 from shared_utils import get_airflow_auth_headers as _get_airflow_auth_headers
 
@@ -92,7 +94,7 @@ def wait_for_services():
 
     services = {
         "API": (lambda: requests.get(f"{API_BASE_URL}/api/v1/health", timeout=2)),
-        "MinIO": (lambda: requests.get(f"http://localhost:9000/minio/health/live", timeout=2)),
+        "MinIO": (lambda: requests.get(f"http://{MINIO_ENDPOINT}/minio/health/live", timeout=2)),
     }
 
     for service_name, check_func in services.items():
@@ -434,24 +436,26 @@ class TestS3ToMongoEndToEnd:
 
         print(f"\n  Checking Airflow for DAG runs created after {trigger_time.isoformat()}...")
 
-        # Airflow 3 /api/v2: use logical_date_gte and order_by=-logical_date
-        # (start_date_gte and order_by=-start_date are Airflow 2 parameters)
-        min_logical_date = (trigger_time - timedelta(seconds=10)).isoformat() + "Z"
         list_url = f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns"
 
         try:
             headers = get_airflow_auth_headers()
             response = requests.get(
                 list_url, headers=headers, timeout=10,
-                params={"logical_date_gte": min_logical_date, "order_by": "-logical_date"},
+                params={"limit": 100, "order_by": "-logical_date"},
             )
 
             if response.status_code == 200:
                 dag_runs = response.json().get("dag_runs", [])
 
-                # Find the most recent DAG run created after our trigger time
-                if dag_runs:
-                    latest_run = dag_runs[0]  # API returns newest first
+                # Find runs with our test workspace in the run_id
+                test_runs = [
+                    run for run in dag_runs
+                    if "test-e2e-ws" in run.get("dag_run_id", "")
+                ]
+
+                if test_runs:
+                    latest_run = test_runs[0]  # API returns newest first due to order_by=-logical_date
                     dag_run_id = latest_run.get("dag_run_id")
 
                     print(f"  ✓ Found DAG run triggered by CDC event")

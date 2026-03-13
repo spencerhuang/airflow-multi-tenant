@@ -1,0 +1,151 @@
+{
+  "info": {
+    "name": "Control Plane – Integrations API",
+    "description": "Full CRUD + trigger for the /api/v1/integrations endpoints.\n\nPre-requisites:\n1. Run `scripts/seed_s3_to_mongo.sql` to populate the DB.\n2. Ensure control-plane-service is running on localhost:8000.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000/api/v1",
+      "type": "string"
+    },
+    {
+      "key": "integrationId",
+      "value": "1",
+      "type": "string"
+    },
+    {
+      "key": "workspaceId",
+      "value": "ws-0001-aaaa-bbbb-000000000001",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Create Integration",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "if (pm.response.code === 201) {",
+              "    var json = pm.response.json();",
+              "    pm.collectionVariables.set('integrationId', json.integration_id);",
+              "    pm.test('Integration created', function () {",
+              "        pm.expect(json.integration_id).to.be.a('number');",
+              "        pm.expect(json.integration_type).to.eql('S3ToMongo');",
+              "    });",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"workspace_id\": \"{{workspaceId}}\",\n  \"workflow_id\": 1,\n  \"auth_id\": 1,\n  \"source_access_pt_id\": 1,\n  \"dest_access_pt_id\": 2,\n  \"integration_type\": \"S3ToMongo\",\n  \"usr_sch_cron\": \"0 2 * * *\",\n  \"usr_timezone\": \"America/Los_Angeles\",\n  \"schedule_type\": \"daily\",\n  \"json_data\": \"{\\\"bucket\\\": \\\"test-bucket\\\", \\\"prefix\\\": \\\"data/\\\", \\\"mongo_collection\\\": \\\"raw_events\\\"}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/integrations/",
+          "host": ["{{baseUrl}}"],
+          "path": ["integrations", ""]
+        },
+        "description": "Create a new S3-to-Mongo integration. On success the integration_id is saved to collection variables for use in subsequent requests."
+      },
+      "response": []
+    },
+    {
+      "name": "List Integrations",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/integrations/?workspace_id={{workspaceId}}&skip=0&limit=50",
+          "host": ["{{baseUrl}}"],
+          "path": ["integrations", ""],
+          "query": [
+            { "key": "workspace_id", "value": "{{workspaceId}}" },
+            { "key": "skip", "value": "0" },
+            { "key": "limit", "value": "50" }
+          ]
+        },
+        "description": "List integrations with optional workspace_id filter and pagination."
+      },
+      "response": []
+    },
+    {
+      "name": "Get Integration by ID",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/integrations/{{integrationId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["integrations", "{{integrationId}}"]
+        },
+        "description": "Retrieve a single integration by its ID."
+      },
+      "response": []
+    },
+    {
+      "name": "Update Integration",
+      "request": {
+        "method": "PUT",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"usr_sch_cron\": \"30 3 * * *\",\n  \"usr_timezone\": \"America/New_York\",\n  \"schedule_type\": \"daily\",\n  \"json_data\": \"{\\\"bucket\\\": \\\"test-bucket\\\", \\\"prefix\\\": \\\"data/v2/\\\", \\\"mongo_collection\\\": \\\"raw_events\\\"}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/integrations/{{integrationId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["integrations", "{{integrationId}}"]
+        },
+        "description": "Update fields on an existing integration (schedule, timezone, json_data, etc.)."
+      },
+      "response": []
+    },
+    {
+      "name": "Trigger Integration",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"integration_id\": {{integrationId}},\n  \"execution_config\": {\n    \"backfill_date\": \"2025-01-01\"\n  }\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/integrations/trigger",
+          "host": ["{{baseUrl}}"],
+          "path": ["integrations", "trigger"]
+        },
+        "description": "Manually trigger an on-demand DAG run for the integration."
+      },
+      "response": []
+    },
+    {
+      "name": "Delete Integration",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/integrations/{{integrationId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["integrations", "{{integrationId}}"]
+        },
+        "description": "Delete an integration by ID. Returns 204 No Content on success."
+      },
+      "response": []
+    }
+  ]
+}

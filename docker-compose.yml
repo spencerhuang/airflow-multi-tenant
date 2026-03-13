@@ -125,13 +125,18 @@ services:
       ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
-
+    healthcheck:
+          # This command always returns exit code 0 (success)
+          test: ["CMD", "true"]
+          interval: 5s
+          retries: 1
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     platform: linux/amd64
     container_name: kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     ports:
       - "9092:9092"
     environment:
@@ -143,6 +148,12 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
     volumes:
       - ./docker/kafka-create-topics.sh:/docker/kafka-create-topics.sh:ro
+    healthcheck:
+      test: kafka-broker-api-versions --bootstrap-server localhost:9092 | grep ApiVersion
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   # Kafka Connect (for Debezium CDC)
   kafka-connect:
@@ -150,14 +161,17 @@ services:
     platform: linux/amd64
     container_name: kafka-connect
     depends_on:
-      - kafka
-      - mysql
-      - mongodb
+      kafka:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
     ports:
       - "8083:8083"
     environment:
       BOOTSTRAP_SERVERS: kafka:29092
       GROUP_ID: debezium-cluster
+      KAFKA_OPTS: "-Xmx512m -Xms256m"
+      KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
       CONFIG_STORAGE_TOPIC: connect_configs
       OFFSET_STORAGE_TOPIC: connect_offsets
       STATUS_STORAGE_TOPIC: connect_status
@@ -168,11 +182,11 @@ services:
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       ENABLE_DEBEZIUM_SCRIPTING: "true"
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8083/" ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
+      test: [ "CMD", "curl", "-f", "http://localhost:8083/connectors" ]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
 
   # Kafka UI (for monitoring Kafka topics, messages, consumer groups)
   kafka-ui:
@@ -317,7 +331,7 @@ services:
       mysql:
         condition: service_healthy
       kafka:
-        condition: service_started
+        condition: service_healthy
     restart: always
     volumes:
       - ./control_plane:/app/control_plane
