@@ -11,6 +11,7 @@ A scalable Airflow-based system supporting multi-tenancy and event-driven archit
 - **Workflow-based DAGs**: Each group of DAGs represents a use case (e.g., s3_to_mongo)
 - **Hybrid scheduling**: Airflow-native daily schedules + dispatcher-based weekly/monthly
 - **Reusable connectors**: S3, Azure, MongoDB, MySQL connectors shared across workflows
+- **Hotspot detection**: There's a limit to max_active_runs, this tries to anticipate potential ceilings for scheduled workflows/dags
 - **Operational safety**: DST handling, backfill control, worker-slot efficiency
 
 ## Architecture Overview
