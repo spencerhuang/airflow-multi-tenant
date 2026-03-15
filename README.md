@@ -1,22 +1,25 @@
 [![Unit Tests without Containers](https://github.com/spencerhuang/airflow-multi-tenant/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/spencerhuang/airflow-multi-tenant/actions/workflows/unit-tests.yml)
 
-# Multi-Tenant Airflow Architecture
+# Multi-Tenant and Event-Driven Airflow System
 
-A scalable Airflow-based architecture supporting multi-tenancy with hybrid scheduling, CDC, and reusable connectors.
+A scalable Airflow-based system supporting multi-tenancy and event-driven architecture with hybrid scheduling, CDC, and reusable connectors.
 
 ## Features
 
-- **Multi-tenancy**: Thousands of tenants, many DAG runs, few DAG definitions
-- **Workflow-based DAGs**: Each DAG represents a use case (e.g., s3_to_mongo)
-- **Hybrid scheduling**: Airflow-native daily schedules + external control plane for weekly/monthly/on-demand
+- **Multi-tenancy**: Hundreds of tenants/customers, many DAG runs
 - **CDC-driven orchestration**: Debezium-triggered runs
+- **Workflow-based DAGs**: Each group of DAGs represents a use case (e.g., s3_to_mongo)
+- **Hybrid scheduling**: Airflow-native daily schedules + dispatcher-based weekly/monthly
 - **Reusable connectors**: S3, Azure, MongoDB, MySQL connectors shared across workflows
 - **Operational safety**: DST handling, backfill control, worker-slot efficiency
 
 ## Architecture Overview
 
 ```
-Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Control Plane Service
+Control Plane Service
+ |
+ v
+Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Kafka Consumer Service
                                                             |
                                                             v
                                                     Airflow REST API
@@ -114,7 +117,7 @@ Reusable modules wrapping data source APIs:
 
 ### Airflow DAGs
 
-- **Daily Scheduled DAGs**: [Dispatcher pattern](docs/DISPATCHER_PATTERN.md) — scheduled DAGs query the control plane DB for due integrations and trigger the ondemand DAG for each one. Each integration gets an isolated DAG run with full conf and IntegrationRun tracking. Daily has to be picked on the hour. Weekly and Monthly do not get to pick the hour.
+- **Scheduled DAGs**: [Dispatcher pattern](docs/DISPATCHER_PATTERN.md) — scheduled DAGs query the control plane DB for due integrations and trigger the ondemand DAG for each one. Each integration gets an isolated DAG run with full conf and IntegrationRun tracking. Daily has to be picked on the hour. Weekly and Monthly do not get to pick the hour.
 - **On-Demand DAG**: Triggered via API for CDC, manual replays, and backfills
 
 ## Testing Strategy
@@ -127,9 +130,9 @@ Reusable modules wrapping data source APIs:
 ## TODO
 
 - Create remaining hourly dispatcher DAGs (daily_00 through daily_23) per workflow — only daily_02 and 03 exist as a working example
-- k8s deployment not verified
+- k8s setup/deployment are not verified
 - Busy-Time Mitigation in section 9.3 was not implemented
-- To scale, kafka_consumer_service in control_plane needs to be its own micro-service, this would also allow fail-over. Once it is its own micro-service, can consider batch processing. This service itself needs to provide health-check
+- To scale, kafka_consumer_service in control_plane needs to be its own micro-service, this would also allow fail-over. Once it is its own micro-service, it'll have its own health-check.
 
 
 ## License
