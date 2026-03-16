@@ -18,17 +18,13 @@ A scalable Airflow-based system supporting multi-tenancy and event-driven archit
 
 What is it?
 
-- Use Case / Requirement
-The business use case defines a workflow: a workflow can be a transfer of data from any one system to another. In my use case, it’s the PDFs in AWS S3 to MongoDB. The workflow can be full-load on demand or scheduled daily load.
-
-- Approach
-On the surface, this sounds like something you can find templates from n8n’s community. However, once you factor in traceability and scalability, n8n feels more like an internal tool, as in I would not want to be the person standing in front of customers explaining why their scheduled DAG did not run, and I better have distributed tracing built-in from day one.
+The business use case defines a workflow: a workflow can be a transfer of data from any one system to another. In my use case, it’s the PDFs in AWS S3 to MongoDB. The workflow can be full-load on demand or scheduled daily load. On the surface, this sounds like something you can find templates from n8n’s community. However, once you factor in traceability and scalability, n8n feels more like an internal tool, as in I would not want to be the person standing in front of customers explaining why their scheduled workflow/DAG did not run.
 
 Who is it for?
-Data Engineers, Product Owner, Data Scientists, ML Engineers, AI Engineers
+Data Engineers, Product Owner/Manager, Data Scientists, ML Engineers, AI Engineers, Business Analysts
 
 Why is it relevant?
-You need data to start your ingestion/training pipeline, regardless you're doing EDA or fine-tuning LLM. This project will bootstrap your data needs not just for the near-term, but robust enough to expand in the long run.
+Regardless you're doing EDA or fine-tuning LLM, you need data to start your ingestion/training pipeline. This project will bootstrap your data needs not just for the near-term, but robust enough to expand in the long run.
 
 ## Architecture Overview
 
