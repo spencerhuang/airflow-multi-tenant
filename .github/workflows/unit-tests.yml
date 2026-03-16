@@ -28,17 +28,19 @@ jobs:
       - name: Set up Python 3.11
         run: uv python install 3.11
 
-      - name: Install dependencies
-        run: uv pip install --system -r requirements-test.txt
+      - name: Create venv and install dependencies
+        run: |
+          uv venv --python 3.11
+          uv pip install -r requirements-test.txt
 
       - name: Run connectors tests
         if: matrix.component == 'connectors'
-        run: pytest connectors/tests/ -v --tb=short
+        run: uv run pytest connectors/tests/ -v --tb=short
 
       - name: Run control plane tests
         if: matrix.component == 'control_plane'
         run: |
-          pytest control_plane/tests/ -v --tb=short \
+          uv run pytest control_plane/tests/ -v --tb=short \
             --ignore=control_plane/tests/test_integration_api_live.py \
             --ignore=control_plane/tests/test_cdc_kafka.py \
             --ignore=control_plane/tests/test_debezium_cdc.py \
@@ -49,4 +51,4 @@ jobs:
         if: matrix.component == 'airflow'
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/airflow/plugins
-        run: pytest airflow/tests/ -v --tb=short
+        run: uv run pytest airflow/tests/ -v --tb=short

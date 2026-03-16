@@ -52,7 +52,7 @@ pytest connectors/tests/ control_plane/tests/test_integration_service.py -v
 
 ```bash
 # 1. Install test dependencies
-pip install -r requirements-test.txt
+uv pip install -r requirements-test.txt
 
 # 2. Start Docker services
 docker-compose up -d
@@ -81,7 +81,7 @@ pytest control_plane/tests/test_cdc_kafka.py -v -s
 - **Use for:** Running tests locally
 
 ```bash
-pip install -r requirements-test.txt
+uv pip install -r requirements-test.txt
 ```
 
 ### Full (requirements.txt + requirements-dev.txt)
@@ -91,8 +91,8 @@ pip install -r requirements-test.txt
 - **Use for:** Full development environment
 
 ```bash
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
+uv pip install -r requirements.txt
+uv pip install -r requirements-dev.txt
 ```
 
 ---
@@ -149,7 +149,7 @@ Current coverage: **94%**
 
 ```bash
 # Install test dependencies
-pip install -r requirements-test.txt
+uv pip install -r requirements-test.txt
 ```
 
 ### Tests timeout or fail

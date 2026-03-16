@@ -627,6 +627,86 @@ alembic upgrade head --sql
 
 ---
 
+## Package Management: pip → uv (Drop-in Replacement)
+
+### What Changed
+
+We replaced `pip` and `pip-tools` (`pip-compile`) with [uv](https://docs.astral.sh/uv/) as a drop-in replacement. All `pip install` commands became `uv pip install`, and `pip-compile` became `uv pip compile`.
+
+| File | Change |
+|------|--------|
+| `Makefile` | `pip install` → `uv pip install`, `pip-compile` → `uv pip compile` |
+| `docker/Dockerfile.control-plane` | Added uv binary via multi-stage copy, `pip install` → `uv pip install --system` |
+| `docker/Dockerfile.kafka-consumer` | Same as above |
+| `.github/workflows/unit-tests.yml` | Replaced `actions/setup-python` with `astral-sh/setup-uv@v5`, `uv venv`, and `uv run` |
+| `run_all_tests.sh` | `pip install` → `uv pip install` |
+| `requirements-dev.txt` | Removed `pip-tools` (uv replaces it) |
+| `.gitignore` | Added `uv.lock` |
+| `.python-version` | Created with `3.11` for uv auto-detection |
+
+All `requirements*.txt` files remain unchanged — uv is fully compatible with pip's format.
+
+### Why Drop-in, Not uv Workspaces
+
+uv offers a native workspace mode (`[tool.uv.workspace]`) that manages dependencies via `uv.lock` and `uv sync`. We intentionally chose **not** to use it because of the **SQLAlchemy version split**:
+
+- **Airflow context** requires `sqlalchemy>=1.4,<2.0` (Airflow 3.0.6 core constraint)
+- **Control Plane and Kafka Consumer** use `sqlalchemy==2.0.46`
+
+uv workspaces resolve a **single version per package** across all workspace members. There is no way to have one member use SQLAlchemy 1.x and another use 2.x within the same workspace lockfile.
+
+The 7 separate `requirements*.txt` files exist because this is a multi-service monorepo where each service has distinct dependency needs:
+
+| File | Purpose | SQLAlchemy |
+|------|---------|------------|
+| `requirements.txt` | Full Airflow environment | `<2.0` |
+| `requirements-control-plane.txt` | FastAPI control plane | `==2.0.46` |
+| `requirements-kafka-consumer.txt` | Lightweight Kafka consumer | `==2.0.46` |
+| `requirements-test.txt` | CI unit tests (no Airflow) | `==2.0.46` |
+| `requirements-dev.txt` | Local development (includes Airflow) | `<2.0` |
+| `requirements-lock.txt` | Locked Airflow deps with hashes | `<2.0` |
+| `requirements-control-plane-lock.txt` | Locked control plane deps with hashes | `==2.0.46` |
+
+This separation is load-bearing — collapsing it into a single `pyproject.toml` would force one SQLAlchemy version and break either Airflow or the control plane.
+
+### What the Drop-in Approach Gives Us
+
+- **Speed**: uv resolves and installs 10-50x faster than pip
+- **Lock file generation**: `uv pip compile` replaces `pip-compile` with the same output format
+- **Zero risk**: All existing requirements files work unchanged
+- **Docker builds**: Faster image builds with the same hash-verified installs
+- **CI**: Faster pipeline runs via the `astral-sh/setup-uv@v5` GitHub Action
+
+### When to Revisit
+
+A full uv workspace migration becomes practical when:
+
+1. **Airflow supports SQLAlchemy 2.0** — eliminates the version split, allowing a single lockfile
+2. **Services are split into separate repos** — each can have its own `uv.lock`
+
+### Common Commands
+
+```bash
+# Install dev dependencies
+uv pip install -r requirements-dev.txt
+
+# Install test dependencies only
+uv pip install -r requirements-test.txt
+
+# Generate locked requirements with hashes
+uv pip compile --generate-hashes --output-file requirements-lock.txt requirements.txt
+
+# Upgrade all locked dependencies
+uv pip compile --generate-hashes --upgrade --output-file requirements-lock.txt requirements.txt
+
+# Or use Makefile shortcuts
+make install       # uv pip install -r requirements-dev.txt
+make lock          # Generate both lock files
+make lock-upgrade  # Upgrade and regenerate lock files
+```
+
+---
+
 ## Summary
 
 ✅ **Extracted**: Kafka consumer into standalone FastAPI microservice (port 8001)

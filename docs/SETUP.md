@@ -6,7 +6,14 @@ This guide will help you set up the Multi-Tenant Airflow Architecture locally.
 
 - Docker and Docker Compose (v2.0+)
 - Python 3.11+
+- [uv](https://docs.astral.sh/uv/) (fast Python package manager)
 - Make (optional, for convenience commands)
+
+### Install uv
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
 ## Quick Start
 
@@ -19,12 +26,12 @@ make setup
 
 This will:
 - Create a `.env` file from `.env.example`
-- Install Python dependencies
+- Install Python dependencies via `uv`
 
 Install the shared packages (required for local development):
 
 ```bash
-pip install -e packages/shared_models -e packages/shared_utils
+uv pip install -e packages/shared_models -e packages/shared_utils
 ```
 
 ### 2. Start All Services
