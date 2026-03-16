@@ -730,7 +730,7 @@ kubectl describe scaledobject airflow-worker-scaler -n airflow
 ## 📖 Related Documentation
 
 - [Airflow Best Practices](../airflow/docs/AIRFLOW_BEST_PRACTICES.md)
-- [Worker Efficiency](../WORKER_EFFICIENCY_IMPROVEMENTS.md)
+- [Worker Efficiency](../docs/WORKER_EFFICIENCY_IMPROVEMENTS.md)
 - [DST Developer Guide](../airflow/docs/DST_DEVELOPER_GUIDE.md)
 - [Backfill Strategy](../airflow/docs/BACKFILL_STRATEGY.md)
 

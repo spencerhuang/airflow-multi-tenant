@@ -140,7 +140,7 @@ pytest control_plane/tests/test_s3_to_mongo_e2e.py -v -s
 
 Created three comprehensive documentation files:
 
-**[KAFKA_CONSUMER.md](KAFKA_CONSUMER.md)** (470 lines):
+**[KAFKA_CONSUMER.md](docs/KAFKA_CONSUMER.md)** (470 lines):
 - Architecture overview
 - Implementation details
 - Configuration guide
@@ -150,7 +150,7 @@ Created three comprehensive documentation files:
 - Production considerations
 - Monitoring and observability
 
-**[KAFKA_EVENT_DRIVEN_IMPLEMENTATION.md](KAFKA_EVENT_DRIVEN_IMPLEMENTATION.md)** (550+ lines):
+**[KAFKA_EVENT_DRIVEN_IMPLEMENTATION.md](docs/KAFKA_EVENT_DRIVEN_IMPLEMENTATION.md)** (550+ lines):
 - Complete implementation summary
 - Architecture diagrams
 - Data flow visualization

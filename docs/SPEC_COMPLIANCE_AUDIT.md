@@ -330,7 +330,7 @@ spring, fall = TimezoneConverter.get_dst_transition_dates(2024, timezone)
 **Files:**
 - [control_plane/app/utils/timezone.py](control_plane/app/utils/timezone.py)
 - [control_plane/tests/test_timezone_dst.py](control_plane/tests/test_timezone_dst.py)
-- [airflow/docs/DST_DEVELOPER_GUIDE.md](airflow/docs/DST_DEVELOPER_GUIDE.md)
+- [airflow/docs/DST_DEVELOPER_GUIDE.md](../airflow/docs/DST_DEVELOPER_GUIDE.md)
 
 ---
 
@@ -424,7 +424,7 @@ control_plane/app/api/endpoints/backfill.py
 ```
 
 **Files:**
-- [airflow/docs/BACKFILL_STRATEGY.md](airflow/docs/BACKFILL_STRATEGY.md)
+- [airflow/docs/BACKFILL_STRATEGY.md](../airflow/docs/BACKFILL_STRATEGY.md)
 
 ---
 
@@ -513,7 +513,7 @@ Spark jobs         | External scripts/JARs  | ✅
 ```
 
 **Files:**
-- [airflow/docs/AIRFLOW_BEST_PRACTICES.md](airflow/docs/AIRFLOW_BEST_PRACTICES.md)
+- [airflow/docs/AIRFLOW_BEST_PRACTICES.md](../airflow/docs/AIRFLOW_BEST_PRACTICES.md)
 - [airflow/dags/](airflow/dags/)
 - [airflow/plugins/operators/](airflow/plugins/operators/)
 - [connectors/](connectors/)
@@ -573,7 +573,7 @@ default_args = {
 ```
 
 **Files:**
-- [airflow/docs/SENSOR_BEST_PRACTICES.md](airflow/docs/SENSOR_BEST_PRACTICES.md)
+- [airflow/docs/SENSOR_BEST_PRACTICES.md](../airflow/docs/SENSOR_BEST_PRACTICES.md)
 - [WORKER_EFFICIENCY_IMPROVEMENTS.md](WORKER_EFFICIENCY_IMPROVEMENTS.md)
 - [airflow/dags/s3_to_mongo_daily_02.py:41](airflow/dags/s3_to_mongo_daily_02.py#L41)
 

@@ -194,7 +194,7 @@ docker volume prune -f
 
 1. **Run tests:** `./run_all_tests.sh`
 2. **Check coverage:** `open htmlcov/all/index.html`
-3. **Read docs:** See [TESTING.md](TESTING.md) for details
+3. **Read docs:** See [TESTING.md](../TESTING.md) for details
 4. **Add tests:** Follow examples in test files
 
 ---
@@ -208,4 +208,4 @@ docker volume prune -f
 
 ---
 
-**Need help?** See [TESTING.md](TESTING.md) for comprehensive guide.
+**Need help?** See [TESTING.md](../TESTING.md) for comprehensive guide.

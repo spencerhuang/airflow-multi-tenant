@@ -216,7 +216,7 @@ Cleanup order verification:
 ## 🔗 Related Documentation
 
 - [FIXES_APPLIED.md](FIXES_APPLIED.md) - All fixes summary
-- [TESTING.md](TESTING.md) - Testing guide
+- [TESTING.md](../TESTING.md) - Testing guide
 - [QUICK_START_TESTING.md](QUICK_START_TESTING.md) - Quick start
 
 ---

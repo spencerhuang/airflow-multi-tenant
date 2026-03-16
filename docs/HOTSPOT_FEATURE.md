@@ -446,7 +446,7 @@ else:
 
 ## 📚 Related Documentation
 
-- [Backfill Strategy](airflow/docs/BACKFILL_STRATEGY.md) - Jitter and exponential backoff
+- [Backfill Strategy](../airflow/docs/BACKFILL_STRATEGY.md) - Jitter and exponential backoff
 - [Worker Efficiency](WORKER_EFFICIENCY_IMPROVEMENTS.md) - KEDA autoscaling
 - [Spec Section 9.3](Multi-tenant%20Airflow%20Architecture%20With%20Hybrid%20Scheduling%20And%20Cdc.docx.pdf#page=7) - Busy-time mitigation
 

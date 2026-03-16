@@ -906,8 +906,7 @@ class ExecuteS3ToMongoTask(BaseOperator):
 
 - [DST Developer Guide](DST_DEVELOPER_GUIDE.md) - Daylight Saving Time handling
 - [Sensor Best Practices](SENSOR_BEST_PRACTICES.md) - Sensor configuration guide
-- [Worker Efficiency Improvements](../../WORKER_EFFICIENCY_IMPROVEMENTS.md) - Operational safety
-- [Testing Guide](../../control_plane/tests/README.md) - Complete testing strategy
+- [Worker Efficiency Improvements](../../docs/WORKER_EFFICIENCY_IMPROVEMENTS.md) - Operational safety
 
 ---
 

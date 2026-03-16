@@ -507,7 +507,7 @@ TimezoneConverter.get_utc_offset_hours(tz, at_time) -> float
 
 - [Timezone Utility Implementation](../control_plane/app/utils/timezone.py)
 - [DST Test Suite](../control_plane/tests/test_timezone_dst.py) - 33 passing tests
-- [DST Implementation Guide](../../DST_IMPLEMENTATION.md) - Complete technical details
+- [DST Implementation Guide](../../docs/DST_IMPLEMENTATION.md) - Complete technical details
 - [Spec Section 7](../../Multi-tenant%20Airflow%20Architecture%20With%20Hybrid%20Scheduling%20And%20Cdc.docx.pdf#page=6) - Original requirements
 
 ---

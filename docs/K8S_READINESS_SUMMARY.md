@@ -165,7 +165,7 @@ Created production-ready deployment manifests with ConfigMap mounting.
 Created extensive Kubernetes deployment documentation.
 
 **File Created:**
-- [k8s/K8S_DEPLOYMENT_GUIDE.md](k8s/K8S_DEPLOYMENT_GUIDE.md) - Complete deployment guide (830+ lines)
+- [k8s/K8S_DEPLOYMENT_GUIDE.md](../k8s/K8S_DEPLOYMENT_GUIDE.md) - Complete deployment guide (830+ lines)
 
 **Documentation Covers:**
 - Architecture principles and configuration hierarchy
@@ -494,8 +494,8 @@ control_plane/app/core/
 
 ## 📖 Related Documentation
 
-- [K8S Deployment Guide](k8s/K8S_DEPLOYMENT_GUIDE.md) - Complete deployment instructions
-- [Airflow Best Practices](airflow/docs/AIRFLOW_BEST_PRACTICES.md) - Overall Airflow guidelines
+- [K8S Deployment Guide](../k8s/K8S_DEPLOYMENT_GUIDE.md) - Complete deployment instructions
+- [Airflow Best Practices](../airflow/docs/AIRFLOW_BEST_PRACTICES.md) - Overall Airflow guidelines
 - [Worker Efficiency](WORKER_EFFICIENCY_IMPROVEMENTS.md) - Worker optimization
 - [Spec Compliance Audit](SPEC_COMPLIANCE_AUDIT.md) - Implementation verification
 

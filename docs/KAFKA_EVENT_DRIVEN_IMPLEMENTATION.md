@@ -596,9 +596,9 @@ class IntegrationCreatedEvent(BaseModel):
 ## Related Documentation
 
 - [Kafka Consumer Service](KAFKA_CONSUMER.md) - Detailed consumer documentation
-- [E2E Test Guide](E2E_TEST_GUIDE.md) - Complete testing guide
-- [Testing Guide](TESTING.md) - All test types and setup
-- [Architecture](docs/ARCHITECTURE.md) - System architecture overview
+- [E2E Test Guide](../E2E_TEST_GUIDE.md) - Complete testing guide
+- [Testing Guide](../TESTING.md) - All test types and setup
+
 
 ## Summary
 

@@ -136,7 +136,7 @@ default_args = {
 
 ### What Was Created
 
-Comprehensive guide: [`airflow/docs/SENSOR_BEST_PRACTICES.md`](airflow/docs/SENSOR_BEST_PRACTICES.md)
+Comprehensive guide: [`airflow/docs/SENSOR_BEST_PRACTICES.md`](../airflow/docs/SENSOR_BEST_PRACTICES.md)
 
 ### Key Content
 
@@ -260,7 +260,7 @@ sensor = AnySensor(
 
 | Document | Purpose | Status |
 |----------|---------|--------|
-| [`SENSOR_BEST_PRACTICES.md`](airflow/docs/SENSOR_BEST_PRACTICES.md) | Complete sensor guide | ✅ Complete |
+| [`SENSOR_BEST_PRACTICES.md`](../airflow/docs/SENSOR_BEST_PRACTICES.md) | Complete sensor guide | ✅ Complete |
 | [`OPERATIONAL_SAFETY_AUDIT.md`](OPERATIONAL_SAFETY_AUDIT.md) | Full audit of safety features | ✅ Complete |
 | [`WORKER_EFFICIENCY_IMPROVEMENTS.md`](WORKER_EFFICIENCY_IMPROVEMENTS.md) | This document | ✅ Complete |
 

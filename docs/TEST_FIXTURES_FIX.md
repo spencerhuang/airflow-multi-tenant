@@ -255,7 +255,7 @@ pytest control_plane/tests/test_integration_api_live.py -v
 
 - [FOREIGN_KEY_FIX.md](FOREIGN_KEY_FIX.md) - Foreign key constraint fix
 - [FIXES_APPLIED.md](FIXES_APPLIED.md) - All fixes summary
-- [TESTING.md](TESTING.md) - Testing guide
+- [TESTING.md](../TESTING.md) - Testing guide
 
 ---
 

@@ -390,7 +390,5 @@ pytest -n auto
 
 ## Next Steps
 
-- [Architecture Documentation](docs/ARCHITECTURE.md)
-- [Setup Guide](SETUP.md)
+- [Setup Guide](SETUP_COMPLETE.md)
 - [API Documentation](http://localhost:8000/docs)
-- [Contributing Guidelines](CONTRIBUTING.md)

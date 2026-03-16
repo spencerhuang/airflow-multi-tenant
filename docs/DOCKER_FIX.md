@@ -198,7 +198,7 @@ No conflicts! Each service gets exactly what it needs.
 ## 📚 Related Files
 
 - [QUICK_START_TESTING.md](QUICK_START_TESTING.md) - How to run tests
-- [TESTING.md](TESTING.md) - Comprehensive testing guide
+- [TESTING.md](../TESTING.md) - Comprehensive testing guide
 - [run_all_tests.sh](run_all_tests.sh) - Automated test script
 - [docker-compose.yml](docker-compose.yml) - Service definitions
 

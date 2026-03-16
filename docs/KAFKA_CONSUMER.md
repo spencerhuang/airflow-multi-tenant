@@ -489,8 +489,8 @@ def idempotent_handler(event_type: str, data: dict):
 
 ## Related Documentation
 
-- [E2E Test Guide](E2E_TEST_GUIDE.md)
-- [Testing Guide](TESTING.md)
+- [E2E Test Guide](../E2E_TEST_GUIDE.md)
+- [Testing Guide](../TESTING.md)
 - [CDC Kafka Tests](kafka_consumer/tests/test_cdc_kafka.py)
 - [Kafka Consumer Health](http://localhost:8001/health/detailed)
 - [Control Plane API](http://localhost:8000/docs)

@@ -78,8 +78,7 @@ Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Kafka Consumer Service (sta
 ```
 
 ## Quick Start
-[SETUP_COMPLETED.md](SETUP_COMPLETE.md)
-[MYSQL_CDC_SETUP.md](MYSQL_CDC_SETUP.md)
+[SETUP_COMPLETE.md](SETUP_COMPLETE.md)
 
 ### Prerequisites
 

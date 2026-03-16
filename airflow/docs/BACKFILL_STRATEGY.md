@@ -841,7 +841,7 @@ STAGGER_INTERVAL_MS = 100                # 100ms between triggers
 ## 📚 Related Documentation
 
 - [Airflow Best Practices](AIRFLOW_BEST_PRACTICES.md) - Overall Airflow guidelines
-- [Worker Efficiency Improvements](../../WORKER_EFFICIENCY_IMPROVEMENTS.md) - Worker slot management
+- [Worker Efficiency Improvements](../../docs/WORKER_EFFICIENCY_IMPROVEMENTS.md) - Worker slot management
 - [DST Developer Guide](DST_DEVELOPER_GUIDE.md) - Timezone handling
 
 ---
