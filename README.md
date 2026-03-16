@@ -29,10 +29,10 @@ Regardless you're doing EDA or fine-tuning LLM, you need data to start your inge
 ## Architecture Overview
 
 ```
-Control Plane Service
+Control Plane Service (REST API, port 8000)
  |
  v
-Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Kafka Consumer Service
+Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Kafka Consumer Service (standalone, port 8001)
                                                             |
                                                             v
                                                     Airflow REST API
@@ -48,13 +48,19 @@ Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Kafka Consumer Service
 ├── packages/               # Shared pip-installable packages
 │   ├── shared_models/     # SQLAlchemy Core table definitions (single source of truth)
 │   └── shared_utils/      # Shared utilities (TimezoneConverter, etc.)
-├── control_plane/          # FastAPI control plane service
+├── control_plane/          # FastAPI control plane service (REST API)
 │   ├── app/
 │   │   ├── api/           # REST API endpoints
 │   │   ├── models/        # SQLAlchemy ORM models (use __table__ from shared_models)
 │   │   ├── schemas/       # Pydantic schemas
 │   │   ├── services/      # Business logic
 │   │   └── core/          # Configuration
+│   └── tests/
+├── kafka_consumer/         # Standalone Kafka CDC consumer service
+│   ├── app/
+│   │   ├── api/           # Health check endpoints (/health, /health/ready, /health/detailed)
+│   │   ├── services/      # KafkaConsumerService (CDC event processing, DAG triggering)
+│   │   └── core/          # Configuration, logging
 │   └── tests/
 ├── connectors/             # Reusable data source connectors
 │   ├── s3/
@@ -94,6 +100,7 @@ docker-compose up -d
 - Airflow UI: http://localhost:8080
 - Control Plane API: http://localhost:8000
 - API Documentation: http://localhost:8000/docs
+- Kafka Consumer Health: http://localhost:8001/health/detailed
 
 ![Docker local](docs/Screenshot2026-02-04at10.56.10AM.png)
 
@@ -114,11 +121,20 @@ docker-compose up -d
 
 ### Control Plane Service
 
-FastAPI-based service that manages:
+FastAPI-based stateless REST API (port 8000) that manages:
 - Workflow registry
 - Schedule management
 - DST normalization
 - Backfill policies
+
+### Kafka Consumer Service
+
+Standalone FastAPI microservice (port 8001) that:
+- Consumes CDC events from Debezium via Kafka
+- Triggers Airflow DAGs when integrations are created
+- Runs independently from the control plane for independent scaling and failover
+- Provides health endpoints: `/health`, `/health/ready`, `/health/detailed`
+- Supports Dead Letter Queue (DLQ) for poison pill handling
 
 ### Connectors
 
@@ -145,8 +161,6 @@ Reusable modules wrapping data source APIs:
 - Create remaining hourly dispatcher DAGs (daily_00 through daily_23) per workflow — only daily_02 and 03 exist as a working example
 - k8s setup/deployment are not verified
 - Busy-Time Mitigation in section 9.3 was not implemented
-- To scale, kafka_consumer_service in control_plane needs to be its own micro-service, this would also allow fail-over. Once it is its own micro-service, it'll have its own health-check.
-
 
 ## License
 

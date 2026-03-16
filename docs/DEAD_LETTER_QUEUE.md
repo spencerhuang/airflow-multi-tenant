@@ -15,37 +15,30 @@ A **poison pill** is a message that cannot be processed successfully and causes 
 ## DLQ Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                   DLQ Architecture                            │
-└──────────────────────────────────────────────────────────────┘
-
 1. Message Arrives
    Kafka Topic: cdc.integration.events
-   ↓
+   |
 2. Consumer Attempts Processing
-   Try #1: ❌ Error (Exception)
-   Try #2: ❌ Error (Exception)
-   Try #3: ❌ Error (Exception)
-   ↓
+   Try #1: Error (Exception)
+   Try #2: Error (Exception)
+   Try #3: Error (Exception)
+   |
 3. Max Retries Exceeded (default: 3)
-   ↓
+   |
 4. Send to Dead Letter Queue
-   Kafka Topic: cdc.integration.events.dlq
-   Message enriched with:
-   - Original message
-   - Error details (type, message, timestamp)
-   - Retry count
-   - Source topic
-   - Consumer group
-   ↓
+   PRIMARY:  MySQL dead_letter_messages table (durable, queryable)
+   SECONDARY: Kafka Topic cdc.integration.events.dlq (optional, for real-time alerting)
+   |
 5. Continue Processing Other Messages
    Consumer is not blocked!
-   ↓
-6. DLQ Monitoring & Recovery
-   - Alert on DLQ messages
-   - Investigate root cause
-   - Fix issue
-   - Replay messages from DLQ
+   |
+6. DLQ Management via REST API
+   GET  /dlq          - List/filter entries
+   GET  /dlq/stats    - Counts by status
+   POST /dlq/{id}/retry  - Re-process message
+   PUT  /dlq/{id}/resolve - Mark as resolved
+   POST /dlq/bulk/resolve - Bulk resolve
+   POST /dlq/bulk/retry   - Bulk retry
 ```
 
 ## Implementation Details
@@ -54,7 +47,7 @@ A **poison pill** is a message that cannot be processed successfully and causes 
 
 The `KafkaConsumerService` class has been enhanced with DLQ support:
 
-**File**: [`control_plane/app/services/kafka_consumer_service.py`](control_plane/app/services/kafka_consumer_service.py)
+**File**: [`kafka_consumer/app/services/kafka_consumer_service.py`](kafka_consumer/app/services/kafka_consumer_service.py)
 
 **Key Components**:
 
@@ -95,15 +88,46 @@ except Exception as e:
         self._send_to_dlq(message, e, retry_count)
 ```
 
-### 2. Configuration
+### 2. Database Persistence (Primary Store)
 
-**File**: [`control_plane/app/core/config.py`](control_plane/app/core/config.py)
+**Table**: `dead_letter_messages` in [`packages/shared_models/shared_models/tables.py`](packages/shared_models/shared_models/tables.py)
+
+**Repository**: [`kafka_consumer/app/services/dlq_repository.py`](kafka_consumer/app/services/dlq_repository.py)
+
+Failed messages are persisted to MySQL as the primary durable store. The Kafka DLQ topic remains as an optional secondary channel for real-time alerting subscribers.
+
+Key features:
+- **Durable**: Survives Kafka topic retention expiry
+- **Queryable**: Filter by status, integration_id, date range
+- **Manageable**: Retry, resolve, and bulk operations via REST API
+- **Observable**: DLQ stats included in `/health/detailed` endpoint
+
+The `integration_id` column uses a soft reference (no FK) so DLQ entries survive integration deletion.
+
+### 3. REST API Endpoints
+
+**File**: [`kafka_consumer/app/api/dlq.py`](kafka_consumer/app/api/dlq.py)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/dlq` | List entries (paginated, filterable) |
+| `GET` | `/dlq/stats` | Counts by status |
+| `GET` | `/dlq/{dlq_id}` | Single entry details |
+| `POST` | `/dlq/{dlq_id}/retry` | Re-process original message |
+| `PUT` | `/dlq/{dlq_id}/resolve` | Mark as resolved with notes |
+| `POST` | `/dlq/bulk/resolve` | Bulk resolve |
+| `POST` | `/dlq/bulk/retry` | Bulk retry |
+
+### 4. Configuration
+
+**File**: [`kafka_consumer/app/core/config.py`](kafka_consumer/app/core/config.py)
 
 ```python
 # Dead Letter Queue configuration
 KAFKA_TOPIC_DLQ: str = "cdc.integration.events.dlq"
 KAFKA_DLQ_ENABLED: bool = True
 KAFKA_DLQ_MAX_RETRIES: int = 3
+KAFKA_DLQ_DB_ENABLED: bool = True  # Enable DB-backed DLQ persistence
 ```
 
 ### 3. Kafka Topics
@@ -141,7 +165,7 @@ Messages in the DLQ topic include:
   },
   "retry_count": 3,
   "source_topic": "cdc.integration.events",
-  "consumer_group": "control-plane-consumer"
+  "consumer_group": "cdc-consumer"
 }
 ```
 
@@ -181,13 +205,13 @@ docker exec kafka kafka-topics --list --bootstrap-server localhost:9092
 #### 3. Restart Control Plane
 
 ```bash
-docker-compose restart control-plane
+docker-compose restart kafka-consumer
 ```
 
 #### 4. Verify DLQ Enabled
 
 ```bash
-docker-compose logs control-plane | grep "DLQ"
+docker-compose logs kafka-consumer | grep "DLQ"
 
 # Expected output:
 # Initializing Kafka consumer: kafka:29092, topic: cdc.integration.events, DLQ: True (topic: cdc.integration.events.dlq, max_retries: 3)
@@ -217,9 +241,9 @@ kubectl get jobs -n airflow kafka-topics-creator
 # kafka-topics-creator    1/1           10s        1m
 ```
 
-#### 3. Update Control Plane ConfigMap
+#### 3. Update Kafka Consumer ConfigMap
 
-Edit `k8s/configmaps/control-plane-config.yaml`:
+Edit ConfigMap for the kafka-consumer deployment (or create `k8s/configmaps/kafka-consumer-config.yaml`):
 
 ```yaml
 # Dead Letter Queue Configuration
@@ -231,8 +255,8 @@ KAFKA_DLQ_MAX_RETRIES: "3"
 Apply the changes:
 
 ```bash
-kubectl apply -f k8s/configmaps/control-plane-config.yaml
-kubectl rollout restart deployment/control-plane -n airflow
+kubectl apply -f k8s/configmaps/kafka-consumer-config.yaml
+kubectl rollout restart deployment/kafka-consumer -n airflow
 ```
 
 ## Monitoring DLQ
@@ -281,10 +305,10 @@ kubectl exec -n airflow kafka-0 -- \
 
 ```bash
 # Docker
-docker-compose logs -f control-plane | grep "DLQ\|retry"
+docker-compose logs -f kafka-consumer | grep "DLQ\|retry"
 
 # Kubernetes
-kubectl logs -f -n airflow -l app=control-plane | grep "DLQ\|retry"
+kubectl logs -f -n airflow -l app=kafka-consumer | grep "DLQ\|retry"
 ```
 
 ### 4. Use Kafka UI
@@ -388,9 +412,10 @@ python scripts/replay_dlq_messages.py dlq_messages.json
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `KAFKA_TOPIC_DLQ` | `cdc.integration.events.dlq` | DLQ topic name |
-| `KAFKA_DLQ_ENABLED` | `True` | Enable/disable DLQ |
-| `KAFKA_DLQ_MAX_RETRIES` | `3` | Max retry attempts |
+| `KAFKA_TOPIC_DLQ` | `cdc.integration.events.dlq` | DLQ Kafka topic name |
+| `KAFKA_DLQ_ENABLED` | `True` | Enable Kafka DLQ topic (secondary) |
+| `KAFKA_DLQ_MAX_RETRIES` | `3` | Max retry attempts before DLQ |
+| `KAFKA_DLQ_DB_ENABLED` | `True` | Enable database DLQ persistence (primary) |
 
 ### Tuning Parameters
 
@@ -490,13 +515,13 @@ annotations:
 **Solution**:
 ```bash
 # Check configuration
-docker-compose logs control-plane | grep "DLQ"
+docker-compose logs kafka-consumer | grep "DLQ"
 
 # Verify topic exists
 docker exec kafka kafka-topics --list --bootstrap-server localhost:9092
 
 # Check DLQ producer
-docker-compose logs control-plane | grep "DLQ producer"
+docker-compose logs kafka-consumer | grep "DLQ producer"
 ```
 
 ### Issue: Consumer Stops Processing
@@ -509,7 +534,7 @@ docker-compose logs control-plane | grep "DLQ producer"
 **Solution**:
 ```bash
 # Check retry logs
-docker-compose logs control-plane | grep "attempt\|retry"
+docker-compose logs kafka-consumer | grep "attempt\|retry"
 
 # Verify DLQ topic is writable
 docker exec kafka kafka-topics --describe --bootstrap-server localhost:9092 --topic cdc.integration.events.dlq
@@ -538,45 +563,37 @@ docker exec kafka kafka-topics --describe --bootstrap-server localhost:9092 --to
 - Reduce load during transient failures
 - Configurable backoff strategy
 
-### 3. DLQ Consumer Service
-- Automated replay of fixed messages
-- Pattern detection and auto-remediation
-- Integration with alerting systems
-
-### 4. Multiple DLQ Tiers
-- DLQ → Manual Review → Archive
-- Different retention policies per tier
-- Automated promotion/demotion
-
-### 5. Dead Letter Analytics
-- Track failure patterns
+### 3. Dead Letter Analytics
+- Track failure patterns over time
 - Identify problematic integrations
-- Predict and prevent failures
+- Dashboard for DLQ trends
+
+### 4. Automated DLQ Cleanup
+- Periodic job to expire old resolved entries
+- Configurable retention for resolved vs pending entries
 
 ## Summary
 
-✅ **Implemented**:
+**Implemented**:
 - Dead Letter Queue for poison pill handling
 - Configurable retry logic (max 3 retries)
 - Error metadata enrichment
-- DLQ topic with 30-day retention
+- Database persistence as primary durable store (survives Kafka retention expiry)
+- Kafka DLQ topic as optional secondary (for real-time alerting)
+- REST API for DLQ management (list, retry, resolve, bulk operations)
+- DLQ stats in `/health/detailed` endpoint
 - Docker and Kubernetes support
 
-✅ **Benefits**:
+**Benefits**:
 - **Resilience**: Consumer never blocked by poison pills
-- **Observability**: All failures captured with context
-- **Recovery**: Messages can be replayed after fixing issues
+- **Durability**: Failed messages stored permanently in MySQL, not lost after Kafka retention
+- **Observability**: All failures captured with context, queryable via API
+- **Recovery**: Messages can be retried via API after fixing issues
 - **Production-Ready**: Follows industry best practices
 
-✅ **Protection Against**:
-- Poison pills blocking consumer
-- Infinite retry loops
-- Data loss from unprocessable messages
-- Cascading failures
-
-🎉 **Dead Letter Queue implementation complete!**
-
 For more information:
-- [Kafka Consumer Service](control_plane/app/services/kafka_consumer_service.py)
-- [Configuration](control_plane/app/core/config.py)
+- [Kafka Consumer Service](kafka_consumer/app/services/kafka_consumer_service.py)
+- [DLQ Repository](kafka_consumer/app/services/dlq_repository.py)
+- [DLQ API](kafka_consumer/app/api/dlq.py)
+- [Configuration](kafka_consumer/app/core/config.py)
 - [Debezium CDC Implementation](DEBEZIUM_CDC_IMPLEMENTATION.md)

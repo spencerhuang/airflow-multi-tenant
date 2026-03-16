@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaError
 
-from control_plane.app.core.config import settings
+from kafka_consumer.app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class KafkaConsumerService:
         self,
         bootstrap_servers: str,
         topic: str,
-        group_id: str = "control-plane-consumer",
+        group_id: str = "cdc-consumer",
         event_handler: Optional[Callable] = None,
         dlq_topic: Optional[str] = None,
         max_retries: int = 3,
@@ -99,8 +99,16 @@ class KafkaConsumerService:
         self.running = False
         self.thread: Optional[threading.Thread] = None
 
+        # Health observability
+        self.started_at: Optional[datetime] = None
+        self.last_message_time: Optional[datetime] = None
+        self.messages_processed: int = 0
+        self.messages_failed: int = 0
+        self.last_error: Optional[str] = None
+        self.is_connected: bool = False
+
         # DLQ producer is lazily initialized when first needed,
-        # because Kafka may not be ready at control plane startup time.
+        # because Kafka may not be ready at startup time.
 
     def _get_dlq_producer(self) -> Optional[KafkaProducer]:
         """Get or lazily initialize the DLQ producer."""
@@ -124,18 +132,44 @@ class KafkaConsumerService:
         """
         Send failed message to Dead Letter Queue.
 
+        Primary: persist to database (durable, queryable).
+        Secondary: send to Kafka DLQ topic (for real-time alerting subscribers).
+
         Args:
             message: Original message that failed
             error: Exception that caused the failure
             retry_count: Number of retry attempts
         """
+        # Extract message key for correlation
+        integration_id = message.get("integration_id")
+        if not integration_id and isinstance(message.get("data"), dict):
+            integration_id = message.get("data", {}).get("integration_id")
+        message_key = str(integration_id if integration_id else "unknown")
+
+        # 1. PRIMARY: Persist to database
+        if settings.KAFKA_DLQ_DB_ENABLED:
+            try:
+                from kafka_consumer.app.services.dlq_repository import persist_dlq_message
+                dlq_id = persist_dlq_message(
+                    original_message=message,
+                    error=error,
+                    retry_count=retry_count,
+                    source_topic=self.topic,
+                    consumer_group=self.group_id,
+                    message_key=message_key,
+                )
+                logger.info(f"DLQ message persisted to database: dlq_id={dlq_id}")
+            except Exception as db_err:
+                logger.error(f"Failed to persist DLQ message to database: {db_err}", exc_info=True)
+
+        # 2. SECONDARY: Send to Kafka DLQ topic
         producer = self._get_dlq_producer()
         if not self.enable_dlq or not producer:
-            logger.warning("DLQ not enabled or producer not initialized")
+            logger.debug("Kafka DLQ producer not enabled or not initialized, skipping Kafka DLQ send")
+            self.retry_tracker.reset_retry(message_key)
             return
 
         try:
-            # Enrich message with error metadata
             dlq_message = {
                 "original_message": message,
                 "error": {
@@ -148,31 +182,24 @@ class KafkaConsumerService:
                 "consumer_group": self.group_id,
             }
 
-            # Use integration_id as key if available (try top level first, then data field)
-            integration_id = message.get("integration_id")
-            if not integration_id and isinstance(message.get("data"), dict):
-                integration_id = message.get("data", {}).get("integration_id")
-            message_key = str(integration_id if integration_id else "unknown")
-
-            # Send to DLQ
             future = producer.send(
                 self.dlq_topic,
                 key=message_key,
                 value=dlq_message
             )
-            future.get(timeout=10)  # Wait for send confirmation
+            future.get(timeout=10)
 
             logger.warning(
-                f"Message sent to DLQ: integration_id={message.get('integration_id')}, "
+                f"Message sent to Kafka DLQ: integration_id={message.get('integration_id')}, "
                 f"error={type(error).__name__}, retries={retry_count}",
                 extra={"dlq_message": dlq_message}
             )
 
-            # Reset retry counter
-            self.retry_tracker.reset_retry(message_key)
-
         except Exception as e:
-            logger.error(f"Failed to send message to DLQ: {e}", exc_info=True)
+            logger.error(f"Failed to send message to Kafka DLQ: {e}", exc_info=True)
+
+        # Reset retry counter
+        self.retry_tracker.reset_retry(message_key)
 
     def start(self) -> None:
         """Start the Kafka consumer in a background thread."""
@@ -182,6 +209,7 @@ class KafkaConsumerService:
 
         logger.info(f"Starting Kafka consumer for topic: {self.topic}")
         self.running = True
+        self.started_at = datetime.now(timezone.utc)
         self.thread = threading.Thread(target=self._consume_loop, daemon=True)
         self.thread.start()
         logger.info("Kafka consumer started successfully")
@@ -211,13 +239,14 @@ class KafkaConsumerService:
         if self.thread:
             self.thread.join(timeout=5)
 
+        self.is_connected = False
         logger.info("Kafka consumer stopped")
 
     def _consume_loop(self) -> None:
         """Main consumer loop running in background thread."""
         try:
             # Initialize Kafka consumer with retry on broker unavailability.
-            # Kafka may not be ready when the control plane starts, so we
+            # Kafka may not be ready when the service starts, so we
             # retry up to 30 times (60 seconds total) before giving up.
             max_connect_retries = 30
             for attempt in range(1, max_connect_retries + 1):
@@ -243,6 +272,7 @@ class KafkaConsumerService:
                     else:
                         raise
 
+            self.is_connected = True
             logger.info(f"Kafka consumer connected to {self.bootstrap_servers}")
             logger.info(f"Subscribed to topic: {self.topic}")
 
@@ -286,6 +316,10 @@ class KafkaConsumerService:
                                 # Process message
                                 self._process_message(message)
 
+                                # Track success
+                                self.messages_processed += 1
+                                self.last_message_time = datetime.now(timezone.utc)
+
                                 # Reset retry counter on success
                                 if self.enable_dlq:
                                     self.retry_tracker.reset_retry(message_key)
@@ -293,6 +327,10 @@ class KafkaConsumerService:
                                     self.consumer.commit()
 
                             except Exception as e:
+                                # Track failure
+                                self.messages_failed += 1
+                                self.last_error = str(e)
+
                                 # Handle processing error
                                 message = record.value if record.value else {}
                                 # Try to get integration_id from top level (Debezium) or from data field (legacy)
@@ -330,10 +368,13 @@ class KafkaConsumerService:
                         logger.error(f"Error in consumer loop: {e}", exc_info=True)
 
         except KafkaError as e:
+            self.last_error = str(e)
             logger.error(f"Kafka error: {e}", exc_info=True)
         except Exception as e:
+            self.last_error = str(e)
             logger.error(f"Unexpected error in consumer: {e}", exc_info=True)
         finally:
+            self.is_connected = False
             if self.consumer:
                 try:
                     self.consumer.close()
@@ -524,19 +565,13 @@ class KafkaConsumerService:
         """
         import json as json_module
         from sqlalchemy import create_engine, select, func
-        from control_plane.app.models.integration import Integration
-        from control_plane.app.models.integration_run import IntegrationRun
-        from control_plane.app.models.auth import Auth
+        from shared_models.tables import integrations as integrations_t, integration_runs as integration_runs_t, auths as auths_t
 
         integration_id = data.get("integration_id")
         logger.info(f"Triggering workflow for integration {integration_id}")
 
         try:
-            # Build sync DATABASE_URL (replace aiomysql with pymysql)
-            sync_db_url = settings.DATABASE_URL.replace(
-                "mysql+aiomysql://", "mysql+pymysql://"
-            )
-            engine = create_engine(sync_db_url)
+            engine = create_engine(settings.DATABASE_URL)
 
             # --- Step 1: Build execution_config from event data ---
             execution_config = {}
@@ -548,7 +583,6 @@ class KafkaConsumerService:
                     execution_config.update(data["destination_config"])
 
             # --- Step 2: Query integration from DB (both paths need this) ---
-            integrations_t = Integration.__table__
             with engine.connect() as conn:
                 row = conn.execute(
                     select(
@@ -627,7 +661,6 @@ class KafkaConsumerService:
                     pass
 
             # Resolve credentials from workspace's Auth records
-            auths_t = Auth.__table__
             with engine.connect() as conn:
                 auth_rows = conn.execute(
                     select(auths_t.c.auth_type, auths_t.c.json_data)
@@ -678,7 +711,6 @@ class KafkaConsumerService:
             dag_run_id = response.json().get("dag_run_id")
 
             # --- Step 6: Record IntegrationRun in DB ---
-            integration_runs_t = IntegrationRun.__table__
             with engine.begin() as conn:
                 conn.execute(
                     integration_runs_t.insert().values(
@@ -742,7 +774,7 @@ def initialize_kafka_consumer(event_handler: Optional[Callable] = None) -> None:
     _consumer_service = KafkaConsumerService(
         bootstrap_servers=bootstrap_servers,
         topic=topic,
-        group_id="control-plane-consumer",
+        group_id=settings.KAFKA_CONSUMER_GROUP,
         dlq_topic=dlq_topic,
         max_retries=max_retries,
         enable_dlq=enable_dlq,

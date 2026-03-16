@@ -20,15 +20,16 @@ Airflow 3.1.7 now offers a stable Kafka Message Queue Trigger with stable Kafka 
 
 ### 1. Production Kafka Consumer Service ✅
 
-**File**: [control_plane/app/services/kafka_consumer_service.py](control_plane/app/services/kafka_consumer_service.py)
+**File**: [kafka_consumer/app/services/kafka_consumer_service.py](kafka_consumer/app/services/kafka_consumer_service.py)
 
-A complete production-ready background service that:
+A standalone FastAPI microservice (port 8001) that:
 - Subscribes to Kafka CDC events (`cdc.integration.events`)
-- Runs as daemon thread in Control Plane application
+- Runs as an independent service, decoupled from the Control Plane
 - Automatically triggers Airflow DAGs when integrations are created
-- Handles errors gracefully without crashing
+- Handles errors gracefully with DLQ support
 - Supports custom event handlers
-- Graceful startup/shutdown lifecycle
+- Provides health endpoints (`/health`, `/health/ready`, `/health/detailed`)
+- Enables independent scaling and failover
 
 **Key Implementation**:
 ```python
@@ -46,26 +47,26 @@ class KafkaConsumerService:
         """Trigger Airflow DAG for integration"""
 ```
 
-### 2. Application Lifecycle Integration ✅
+### 2. Standalone Service Lifecycle ✅
 
-**File**: [control_plane/app/main.py](control_plane/app/main.py)
+**File**: [kafka_consumer/app/main.py](kafka_consumer/app/main.py)
 
-Updated FastAPI to automatically manage consumer:
+Standalone FastAPI app with modern `lifespan` context manager:
 ```python
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     initialize_kafka_consumer()
-
-@app.on_event("shutdown")
-async def shutdown_event():
+    yield
     shutdown_kafka_consumer()
 ```
 
+The control plane ([control_plane/app/main.py](control_plane/app/main.py)) no longer manages the Kafka consumer — it is a pure stateless REST API.
+
 ### 3. Comprehensive Test Suite ✅
 
-**File**: [control_plane/tests/test_kafka_consumer_service.py](control_plane/tests/test_kafka_consumer_service.py)
+**File**: [kafka_consumer/tests/test_kafka_consumer_service.py](kafka_consumer/tests/test_kafka_consumer_service.py)
 
-Complete test coverage with **13 test cases**:
+Complete test coverage with **18 test cases**:
 
 **Unit Tests** (9 tests):
 - `test_consumer_initialization` - Verify service initialization
@@ -87,9 +88,15 @@ Complete test coverage with **13 test cases**:
 - `test_initialize_twice_warning` - Test double-init handling
 - `test_shutdown_when_not_initialized` - Test shutdown safety
 
+**Health & Observability Tests** (4 tests):
+- `test_health_observability_attributes` - Test metrics tracking attributes
+- `test_messages_processed_counter` - Test processing counter increments
+- `test_messages_failed_counter` - Test failure counter increments
+- `test_is_connected_flag` - Test connection state tracking
+
 **Run Tests**:
 ```bash
-pytest control_plane/tests/test_kafka_consumer_service.py -v -s
+pytest kafka_consumer/tests/test_kafka_consumer_service.py -v -s
 ```
 
 ### 4. Updated E2E Test (Event-Driven) ✅
@@ -192,13 +199,18 @@ Created three comprehensive documentation files:
 
 ```
 ┌─────────────────────────────────────────────┐
-│  FastAPI Application                        │
+│  Kafka Consumer Microservice (port 8001)    │
 │                                             │
-│  @app.on_event("startup")                  │
+│  lifespan(app):                             │
 │    → initialize_kafka_consumer()            │
 │       → KafkaConsumerService.start()        │
 │          → Background thread launched       │
 │          → Subscribes to Kafka topic        │
+│    yield                                    │
+│    → shutdown_kafka_consumer()              │
+│       → Stop polling                        │
+│       → Commit offsets                      │
+│       → Close connections                   │
 │                                             │
 │  while running:                            │
 │    messages = poll(kafka)                   │
@@ -212,11 +224,10 @@ Created three comprehensive documentation files:
 │          ↓                                  │
 │        DAG triggered                        │
 │                                             │
-│  @app.on_event("shutdown")                 │
-│    → shutdown_kafka_consumer()              │
-│       → Stop polling                        │
-│       → Commit offsets                      │
-│       → Close connections                   │
+│  Health Endpoints:                          │
+│    GET /health          (liveness)          │
+│    GET /health/ready    (readiness)         │
+│    GET /health/detailed (diagnostics)       │
 └─────────────────────────────────────────────┘
 ```
 
@@ -235,32 +246,37 @@ docker-compose ps
 ### 2. Verify Consumer Started
 
 ```bash
-# Check Control Plane logs
-docker-compose logs control-plane | grep "Kafka consumer"
+# Check Kafka Consumer logs
+docker-compose logs kafka-consumer | grep "Kafka consumer"
 
 # Expected:
 # INFO: Starting Kafka consumer for topic: cdc.integration.events
 # INFO: Kafka consumer connected to kafka:29092
 # INFO: Kafka consumer initialized successfully
+
+# Check health endpoints
+curl http://localhost:8001/health
+curl http://localhost:8001/health/ready
+curl http://localhost:8001/health/detailed
 ```
 
 ### 3. Monitor Activity
 
 **Kafka UI**: http://localhost:8081
 - Navigate to Consumer Groups
-- Find: `control-plane-consumer`
+- Find: `cdc-consumer`
 - View lag and consumption rate
 
-**Control Plane Logs**:
+**Kafka Consumer Logs**:
 ```bash
-docker-compose logs -f control-plane | grep "Processing CDC event"
+docker-compose logs -f kafka-consumer | grep "Processing CDC event"
 ```
 
 ### 4. Run Tests
 
 ```bash
-# Unit + Integration tests
-pytest control_plane/tests/test_kafka_consumer_service.py -v -s
+# Kafka consumer service tests
+pytest kafka_consumer/tests/test_kafka_consumer_service.py -v -s
 
 # E2E test (event-driven)
 pytest control_plane/tests/test_s3_to_mongo_e2e.py -v -s
@@ -268,21 +284,24 @@ pytest control_plane/tests/test_s3_to_mongo_e2e.py -v -s
 
 ## Configuration
 
-**Docker Compose** ([docker-compose.yml](docker-compose.yml#L269)):
+**Docker Compose** ([docker-compose.yml](docker-compose.yml)):
 ```yaml
-control-plane:
+kafka-consumer:
   environment:
+    DATABASE_URL: mysql+pymysql://control_plane:control_plane@mysql:3306/control_plane
     KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    AIRFLOW_API_URL: http://airflow-webserver:8080/api/v2
 ```
 
-**Application Config** ([control_plane/app/core/config.py](control_plane/app/core/config.py#L46-47)):
+**Application Config** ([kafka_consumer/app/core/config.py](kafka_consumer/app/core/config.py)):
 ```python
 KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
 KAFKA_TOPIC_CDC: str = "cdc.integration.events"
+KAFKA_CONSUMER_GROUP: str = "cdc-consumer"
 ```
 
 **Consumer Settings**:
-- Group ID: `control-plane-consumer`
+- Group ID: `cdc-consumer` (configurable via `KAFKA_CONSUMER_GROUP`)
 - Auto Offset Reset: `earliest`
 - Auto Commit: Enabled
 - Max Records per Poll: 10
@@ -293,8 +312,8 @@ KAFKA_TOPIC_CDC: str = "cdc.integration.events"
 ### Run All Tests
 
 ```bash
-# Consumer service tests
-pytest control_plane/tests/test_kafka_consumer_service.py -v -s
+# Kafka consumer service tests
+pytest kafka_consumer/tests/test_kafka_consumer_service.py -v -s
 
 # E2E test (event-driven)
 pytest control_plane/tests/test_s3_to_mongo_e2e.py -v -s
@@ -305,10 +324,11 @@ pytest control_plane/tests/test_cdc_kafka.py -v -s
 
 ### Expected Results
 
-**Kafka Consumer Tests**: 13/13 passing
+**Kafka Consumer Tests**: 18/18 passing
 - 9 unit tests
 - 2 integration tests
 - 3 global service tests
+- 4 health/observability tests
 
 **E2E Test**: 6/6 passing
 - Upload to MinIO ✓
@@ -320,43 +340,33 @@ pytest control_plane/tests/test_cdc_kafka.py -v -s
 
 ## Files Created/Modified
 
-### New Files Created
+### Kafka Consumer Microservice (New)
 
-1. **control_plane/app/services/kafka_consumer_service.py** (290 lines)
-   - Production Kafka consumer service
-   - Event processing logic
-   - DAG triggering functionality
+1. **kafka_consumer/app/main.py** — FastAPI app with lifespan context manager
+2. **kafka_consumer/app/core/config.py** — Slim Settings (Kafka, DB, Airflow, logging)
+3. **kafka_consumer/app/core/logging.py** — JSON logging configuration
+4. **kafka_consumer/app/services/kafka_consumer_service.py** — Consumer service with health observability
+5. **kafka_consumer/app/api/health.py** — Liveness, readiness, and detailed health endpoints
+6. **kafka_consumer/tests/test_kafka_consumer_service.py** — 18 test cases
+7. **kafka_consumer/tests/conftest.py** — Test configuration
+8. **docker/Dockerfile.kafka-consumer** — Container image for the consumer service
+9. **requirements-kafka-consumer.txt** — Minimal dependencies
 
-2. **control_plane/tests/test_kafka_consumer_service.py** (340 lines)
-   - Comprehensive test suite
-   - 13 test cases covering all scenarios
+### Control Plane (Modified)
 
-3. **KAFKA_CONSUMER.md** (470 lines)
-   - Complete consumer documentation
-   - Architecture, configuration, troubleshooting
+1. **control_plane/app/main.py** — Removed Kafka consumer lifecycle (now pure REST API)
+2. **control_plane/app/core/config.py** — Removed Kafka settings
+3. **control_plane/app/services/kafka_consumer_service.py** — Deleted (moved to kafka_consumer/)
+4. **control_plane/tests/test_kafka_consumer_service.py** — Deleted (moved to kafka_consumer/)
 
-4. **KAFKA_EVENT_DRIVEN_IMPLEMENTATION.md** (550+ lines)
-   - Full implementation guide
-   - Architecture diagrams and data flows
+### Infrastructure (Modified)
 
-5. **IMPLEMENTATION_SUMMARY.md** (this file)
-   - High-level summary of all work
+1. **docker-compose.yml** — Added kafka-consumer service, removed Kafka dependency from control-plane
 
-### Files Modified
+### Documentation (Modified)
 
-1. **control_plane/app/main.py**
-   - Added Kafka consumer lifecycle management
-   - Startup and shutdown event handlers
-
-2. **control_plane/tests/test_s3_to_mongo_e2e.py**
-   - Added Kafka producer fixture
-   - Updated test_04 to use Kafka events
-   - Changed from direct API calls to event-driven
-
-3. **E2E_TEST_GUIDE.md**
-   - Updated with Kafka consumer section
-   - New architecture diagrams
-   - Added kafka-python to prerequisites
+1. **README.md** — Updated architecture, project structure, service access
+2. **IMPLEMENTATION_SUMMARY.md** (this file) — Updated to reflect standalone architecture
 
 ## Key Benefits
 
@@ -392,20 +402,23 @@ pytest control_plane/tests/test_cdc_kafka.py -v -s
 docker-compose up -d
 
 # Verify consumer is running
-docker-compose logs control-plane | grep "Kafka consumer"
+docker-compose logs kafka-consumer | grep "Kafka consumer"
+
+# Check consumer health
+curl http://localhost:8001/health/detailed
 
 # Run tests
-pytest control_plane/tests/test_kafka_consumer_service.py -v
+pytest kafka_consumer/tests/test_kafka_consumer_service.py -v
 pytest control_plane/tests/test_s3_to_mongo_e2e.py -v -s
 
 # Monitor consumer activity
-docker-compose logs -f control-plane | grep "Processing CDC event"
+docker-compose logs -f kafka-consumer | grep "Processing CDC event"
 
 # Check Kafka consumer group
 docker exec kafka kafka-consumer-groups \
   --bootstrap-server localhost:9092 \
   --describe \
-  --group control-plane-consumer
+  --group cdc-consumer
 ```
 
 ## Error Tracking: XCom-Based Pipeline Error Capture
@@ -616,17 +629,17 @@ alembic upgrade head --sql
 
 ## Summary
 
-✅ **Implemented**: Production-ready Kafka consumer service
-✅ **Tested**: 13 comprehensive test cases
-✅ **Updated**: E2E test to use event-driven triggering
-✅ **Documented**: Three detailed documentation files
-✅ **Verified**: Complete data pipeline works end-to-end
+✅ **Extracted**: Kafka consumer into standalone FastAPI microservice (port 8001)
+✅ **Decoupled**: Control plane is now a pure stateless REST API (no Kafka dependency)
+✅ **Tested**: 18 comprehensive test cases for the consumer service
+✅ **Observable**: Liveness, readiness, and detailed health endpoints
+✅ **Containerized**: Dedicated Dockerfile and docker-compose service
+✅ **Documented**: Architecture, configuration, and operational guides updated
 
-The control plane now has a fully functional Kafka consumer that:
-- Automatically starts with the application
-- Listens for CDC events in real-time
-- Triggers Airflow workflows when integrations are created
-- Handles errors gracefully
-- Is comprehensively tested and documented
-
-**The event-driven data pipeline is now complete and production-ready!** 🎉
+The Kafka consumer now runs as an independent microservice that:
+- Scales independently from the control plane
+- Supports failover via Kafka consumer group rebalancing
+- Provides health endpoints for container orchestration
+- Uses modern FastAPI lifespan for clean startup/shutdown
+- Connects directly to MySQL via pymysql (no aiomysql dependency)
+- Uses `shared_models` Core tables directly (no ORM dependency)

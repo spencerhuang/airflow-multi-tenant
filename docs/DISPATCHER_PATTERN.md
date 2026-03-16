@@ -58,7 +58,7 @@ Located in `airflow/plugins/operators/dispatch_operators.py`.
    - `integration.json_data`: non-sensitive workflow config (`s3_bucket`, `s3_prefix`, `mongo_collection`)
    - All `auth` records for the workspace: credentials (`s3_access_key`, `mongo_uri`, etc.)
 
-   This is the same conf-building pattern used by the control plane's `integration_service` and `kafka_consumer_service`.
+   This is the same conf-building pattern used by the control plane's `integration_service` and the standalone `kafka_consumer` microservice.
 
 3. **Trigger the pipeline DAG** — POSTs to the `s3_to_mongo_ondemand` DAG via Airflow REST API. The DAG name is `_ondemand` because it's the same shared pipeline used by all trigger sources (API, Kafka, dispatcher). The `_scheduled_` in the `dag_run_id` distinguishes dispatcher-originated runs from other sources.
    ```

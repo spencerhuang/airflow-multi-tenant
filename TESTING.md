@@ -158,6 +158,7 @@ The test environment uses these services (defined in `docker-compose.yml`):
 | Airflow Webserver | 8080 | Airflow UI |
 | Airflow Scheduler | - | DAG scheduler |
 | Control Plane API | 8000 | REST API |
+| Kafka Consumer | 8001 | CDC event consumer microservice |
 
 ## UI Access
 
@@ -210,6 +211,9 @@ docker-compose logs -f airflow-webserver
 
 # API health check
 curl http://localhost:8000/api/v1/health
+
+# Kafka consumer health check
+curl http://localhost:8001/health/detailed
 ```
 
 ## Coverage Reports

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 
-from control_plane.app.services.kafka_consumer_service import (
+from kafka_consumer.app.services.kafka_consumer_service import (
     KafkaConsumerService,
     MessageRetryTracker,
     initialize_kafka_consumer,
@@ -417,7 +417,7 @@ class TestConsumerServiceGlobals:
         assert get_kafka_consumer_service() is None
 
         # Initialize consumer
-        with patch("control_plane.app.services.kafka_consumer_service.settings") as mock_settings:
+        with patch("kafka_consumer.app.services.kafka_consumer_service.settings") as mock_settings:
             mock_settings.KAFKA_BOOTSTRAP_SERVERS = KAFKA_BOOTSTRAP_SERVERS
 
             initialize_kafka_consumer()
@@ -437,7 +437,7 @@ class TestConsumerServiceGlobals:
 
     def test_initialize_twice_warning(self):
         """Test that initializing twice logs a warning."""
-        with patch("control_plane.app.services.kafka_consumer_service.settings") as mock_settings:
+        with patch("kafka_consumer.app.services.kafka_consumer_service.settings") as mock_settings:
             mock_settings.KAFKA_BOOTSTRAP_SERVERS = KAFKA_BOOTSTRAP_SERVERS
 
             # First initialization

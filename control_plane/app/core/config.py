@@ -20,8 +20,6 @@ class Settings(BaseSettings):
         ALGORITHM: JWT algorithm
         ACCESS_TOKEN_EXPIRE_MINUTES: JWT token expiration time
         AUTH_ENABLED: Enable/disable authentication
-        KAFKA_BOOTSTRAP_SERVERS: Kafka bootstrap servers
-        KAFKA_TOPIC_CDC: Kafka topic for CDC events
     """
 
     PROJECT_NAME: str = "Airflow Multi-Tenant Control Plane"
@@ -41,15 +39,6 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     AUTH_ENABLED: bool = False  # Disabled for now as per requirements
-
-    # Kafka
-    KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
-    KAFKA_TOPIC_CDC: str = "cdc.integration.events"
-    KAFKA_TOPIC_DLQ: str = "cdc.integration.events.dlq"
-
-    # Dead Letter Queue configuration
-    KAFKA_DLQ_ENABLED: bool = True
-    KAFKA_DLQ_MAX_RETRIES: int = 3
 
     # Backfill Strategy (Section 9 of spec)
     MAX_BACKFILL_DAYS: int = 7

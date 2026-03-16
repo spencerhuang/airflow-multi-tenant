@@ -170,3 +170,24 @@ integration_run_errors = Table(
     Column("task_id", String(255)),
     Column("timestamp", DateTime, default=_utcnow, nullable=False),
 )
+
+# ── dead_letter_messages ────────────────────────────────────────────────────
+
+dead_letter_messages = Table(
+    "dead_letter_messages",
+    metadata,
+    Column("dlq_id", Integer, primary_key=True, autoincrement=True),
+    Column("integration_id", Integer, nullable=True, index=True),  # soft reference, no FK
+    Column("source_topic", String(255), nullable=False),
+    Column("consumer_group", String(255), nullable=False),
+    Column("message_key", String(255), nullable=True, index=True),
+    Column("original_message", Text, nullable=False),
+    Column("error_type", String(255), nullable=False),
+    Column("error_message", Text, nullable=False),
+    Column("retry_count", Integer, nullable=False, default=0),
+    Column("status", String(20), nullable=False, default="pending", index=True),
+    Column("resolution_notes", Text, nullable=True),
+    Column("resolved_at", DateTime, nullable=True),
+    Column("created_at", DateTime, default=_utcnow, nullable=False),
+    Column("updated_at", DateTime, default=_utcnow, onupdate=_utcnow, nullable=False),
+)

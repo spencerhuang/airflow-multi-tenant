@@ -32,7 +32,8 @@ from control_plane.app.models import (
     workflow,
     access_point,
     integration,
-    integration_run
+    integration_run,
+    dead_letter_message,
 )
 
 # this is the Alembic Config object, which provides

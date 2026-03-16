@@ -1,0 +1,36 @@
+FROM python:3.11-slim
+
+LABEL org.opencontainers.image.title="airflow-multi-tenant-kafka-consumer"
+LABEL org.opencontainers.image.version="0.1.0"
+LABEL org.opencontainers.image.description="Kafka CDC Consumer service for multi-tenant Airflow"
+LABEL org.opencontainers.image.licenses="MIT"
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    default-libmysqlclient-dev \
+    pkg-config \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install dependencies
+COPY requirements-kafka-consumer.txt /app/
+RUN pip install --no-cache-dir -r /app/requirements-kafka-consumer.txt
+
+# Copy shared packages (single source of truth for models and utilities)
+COPY packages/shared_models/shared_models /app/shared_models
+COPY packages/shared_utils/shared_utils /app/shared_utils
+
+# Copy application code
+COPY kafka_consumer /app/kafka_consumer
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Expose port
+EXPOSE 8001
+
+# Run the application
+CMD ["uvicorn", "kafka_consumer.app.main:app", "--host", "0.0.0.0", "--port", "8001"]

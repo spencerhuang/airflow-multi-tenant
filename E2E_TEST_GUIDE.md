@@ -29,13 +29,14 @@ The `ExecuteS3ToMongoTask` now performs real data transfer:
 - Returns detailed statistics (files_processed, records_read, records_written, errors)
 
 ### 3. Kafka Consumer Service
-**File:** `control_plane/app/services/kafka_consumer_service.py`
+**File:** `kafka_consumer/app/services/kafka_consumer_service.py`
 
-Background service that:
+Standalone FastAPI microservice (port 8001) that:
 - Subscribes to Kafka topic `cdc.integration.events`
 - Listens for CDC events (integration.created, updated, deleted, etc.)
 - Automatically triggers Airflow DAGs when integration.created events are received
-- Runs continuously as part of Control Plane service lifecycle
+- Runs independently from the Control Plane with its own lifecycle
+- Provides health endpoints (`/health`, `/health/ready`, `/health/detailed`)
 
 ### 4. Complete E2E Test with Event-Driven Architecture
 **File:** `control_plane/tests/test_s3_to_mongo_e2e.py`

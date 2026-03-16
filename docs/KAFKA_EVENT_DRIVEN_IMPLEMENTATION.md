@@ -8,10 +8,10 @@ This document summarizes the implementation of the Kafka-based event-driven arch
 
 ### 1. Kafka Consumer Service
 
-**File**: [control_plane/app/services/kafka_consumer_service.py](control_plane/app/services/kafka_consumer_service.py)
+**File**: [kafka_consumer/app/services/kafka_consumer_service.py](kafka_consumer/app/services/kafka_consumer_service.py)
 
 A production-ready background service that:
-- Runs as a daemon thread within the Control Plane application
+- Runs as an independent microservice (port 8001)
 - Subscribes to Kafka topic: `cdc.integration.events`
 - Processes CDC events in real-time
 - Automatically triggers Airflow DAGs when integrations are created
@@ -34,33 +34,30 @@ class KafkaConsumerService:
 - `integration.run.completed` → Logs successful completion
 - `integration.run.failed` → Logs failures (future: alerts/retries)
 
-### 2. Application Lifecycle Integration
+### 2. Standalone Service Lifecycle
 
-**File**: [control_plane/app/main.py](control_plane/app/main.py)
+**File**: [kafka_consumer/app/main.py](kafka_consumer/app/main.py)
 
-Updated FastAPI application to manage Kafka consumer lifecycle:
+Standalone FastAPI microservice with lifespan-managed Kafka consumer lifecycle:
 
 ```python
-@app.on_event("startup")
-async def startup_event():
-    """Initialize Kafka consumer on application startup"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage Kafka consumer lifecycle"""
     initialize_kafka_consumer()
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Gracefully stop Kafka consumer on shutdown"""
+    yield
     shutdown_kafka_consumer()
 ```
 
 The consumer:
-- Starts automatically when Control Plane service starts
+- Starts automatically when the Kafka consumer standalone service starts
 - Runs in background without blocking API requests
 - Stops gracefully on application shutdown
 - Commits Kafka offsets before closing
 
 ### 3. Kafka Consumer Service Tests
 
-**File**: [control_plane/tests/test_kafka_consumer_service.py](control_plane/tests/test_kafka_consumer_service.py)
+**File**: [kafka_consumer/tests/test_kafka_consumer_service.py](kafka_consumer/tests/test_kafka_consumer_service.py)
 
 Comprehensive test suite covering:
 - Consumer initialization and lifecycle
@@ -81,7 +78,7 @@ Comprehensive test suite covering:
 docker-compose up -d
 
 # Run Kafka consumer tests
-pytest control_plane/tests/test_kafka_consumer_service.py -v -s
+pytest kafka_consumer/tests/test_kafka_consumer_service.py -v -s
 ```
 
 ### 4. Updated E2E Test
@@ -148,8 +145,8 @@ Test → Kafka Event → Consumer Service → Airflow API → DAG Execution → 
 
 3. CONSUMER PROCESSES EVENT
    ┌──────────────┐
-   │    Kafka     │  → Running in Control Plane
-   │  Consumer    │     Background thread
+   │    Kafka     │  → Standalone Microservice (port 8001)
+   │  Consumer    │
    │  Service     │
    └──────┬───────┘
           │ Processes event
@@ -183,16 +180,15 @@ Test → Kafka Event → Consumer Service → Airflow API → DAG Execution → 
 └─────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────┐
-│  FastAPI Application Lifecycle                               │
+│  Kafka Consumer Service Lifecycle                            │
 │                                                              │
-│  @app.on_event("startup")                                   │
+│  lifespan(app):                                             │
 │    → initialize_kafka_consumer()                             │
 │       → Creates KafkaConsumerService instance                │
 │       → Starts background thread                             │
 │       → Connects to Kafka                                    │
 │       → Subscribes to topic                                  │
-│                                                              │
-│  @app.on_event("shutdown")                                  │
+│    yield                                                     │
 │    → shutdown_kafka_consumer()                               │
 │       → Stops polling                                        │
 │       → Commits offsets                                      │
@@ -234,12 +230,12 @@ Test → Kafka Event → Consumer Service → Airflow API → DAG Execution → 
 
 In [docker-compose.yml](docker-compose.yml):
 ```yaml
-control-plane:
+kafka-consumer:
   environment:
     KAFKA_BOOTSTRAP_SERVERS: kafka:29092
 ```
 
-In [control_plane/app/core/config.py](control_plane/app/core/config.py):
+In [kafka_consumer/app/core/config.py](kafka_consumer/app/core/config.py):
 ```python
 KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
 KAFKA_TOPIC_CDC: str = "cdc.integration.events"
@@ -249,7 +245,7 @@ KAFKA_TOPIC_CDC: str = "cdc.integration.events"
 
 - **Bootstrap Servers**: kafka:29092 (Docker internal)
 - **Topic**: cdc.integration.events
-- **Consumer Group**: control-plane-consumer
+- **Consumer Group**: cdc-consumer
 - **Auto Offset Reset**: earliest (start from beginning on first run)
 - **Auto Commit**: Enabled
 - **Max Records per Poll**: 10 messages
@@ -274,33 +270,37 @@ docker-compose ps
 # - minio (Source storage)
 # - airflow-webserver
 # - airflow-scheduler
-# - control-plane (with Kafka consumer)
+# - control-plane
+# - kafka-consumer
 ```
 
 ### 2. Verify Kafka Consumer Started
 
 ```bash
-# Check Control Plane logs
-docker-compose logs -f control-plane
+# Check Kafka consumer logs
+docker-compose logs -f kafka-consumer
 
 # Expected output:
 # INFO: Starting Kafka consumer for topic: cdc.integration.events
 # INFO: Kafka consumer connected to kafka:29092
 # INFO: Subscribed to topic: cdc.integration.events
 # INFO: Kafka consumer initialized successfully
+
+# Health check
+curl http://localhost:8001/health/detailed
 ```
 
 ### 3. Monitor Consumer Activity
 
 **Via Kafka UI**: http://localhost:8081
 - Navigate to Consumer Groups
-- Find: `control-plane-consumer`
+- Find: `cdc-consumer`
 - View consumer lag and offset position
 
 **Via Logs**:
 ```bash
 # Watch for event processing
-docker-compose logs -f control-plane | grep "Processing CDC event"
+docker-compose logs -f kafka-consumer | grep "Processing CDC event"
 ```
 
 ### 4. Run E2E Test
@@ -324,14 +324,14 @@ pytest control_plane/tests/test_s3_to_mongo_e2e.py -v -s
 
 Test consumer logic in isolation:
 ```bash
-pytest control_plane/tests/test_kafka_consumer_service.py::TestKafkaConsumerService -v
+pytest kafka_consumer/tests/test_kafka_consumer_service.py::TestKafkaConsumerService -v
 ```
 
 ### Integration Tests
 
 Test with real Kafka broker:
 ```bash
-pytest control_plane/tests/test_kafka_consumer_service.py::TestKafkaConsumerIntegration -v
+pytest kafka_consumer/tests/test_kafka_consumer_service.py::TestKafkaConsumerIntegration -v
 ```
 
 ### E2E Tests
@@ -372,9 +372,9 @@ kafka-console-producer --bootstrap-server localhost:9092 --topic cdc.integration
 }
 ```
 
-Then check Control Plane logs:
+Then check Kafka consumer logs:
 ```bash
-docker-compose logs control-plane | grep -A 5 "Processing CDC event"
+docker-compose logs kafka-consumer | grep -A 5 "Processing CDC event"
 ```
 
 ## Monitoring
@@ -386,7 +386,7 @@ docker-compose logs control-plane | grep -A 5 "Processing CDC event"
    - Should be close to 0 for healthy system
 
 2. **Event Processing Rate**: Messages/second
-   - Monitor in Control Plane logs
+   - Monitor in Kafka consumer logs
    - Track successful triggers vs failures
 
 3. **DAG Trigger Success Rate**: % of successful triggers
@@ -401,19 +401,19 @@ docker-compose logs control-plane | grep -A 5 "Processing CDC event"
 
 ```bash
 # Check consumer is running
-docker-compose logs control-plane | grep "Kafka consumer"
+docker-compose logs kafka-consumer | grep "Kafka consumer"
 
 # View recent events processed
-docker-compose logs control-plane --tail=100 | grep "Processing CDC event"
+docker-compose logs kafka-consumer --tail=100 | grep "Processing CDC event"
 
 # Check for errors
-docker-compose logs control-plane | grep -i error
+docker-compose logs kafka-consumer | grep -i error
 
 # Monitor Kafka consumer group
 docker exec kafka kafka-consumer-groups \
   --bootstrap-server localhost:9092 \
   --describe \
-  --group control-plane-consumer
+  --group cdc-consumer
 ```
 
 ## Troubleshooting
@@ -442,8 +442,8 @@ docker-compose restart kafka
 # Wait 30 seconds
 sleep 30
 
-# Restart Control Plane
-docker-compose restart control-plane
+# Restart Kafka consumer
+docker-compose restart kafka-consumer
 ```
 
 ### Events Not Triggering DAGs
@@ -453,10 +453,10 @@ docker-compose restart control-plane
 **Check**:
 ```bash
 # View consumer logs
-docker-compose logs control-plane | grep "integration.created"
+docker-compose logs kafka-consumer | grep "integration.created"
 
 # Check for trigger errors
-docker-compose logs control-plane | grep "Failed to trigger"
+docker-compose logs kafka-consumer | grep "Failed to trigger"
 
 # Verify Airflow is accessible
 curl -u airflow:airflow http://localhost:8080/api/v1/dags
@@ -464,7 +464,7 @@ curl -u airflow:airflow http://localhost:8080/api/v1/dags
 
 **Common Causes**:
 1. Integration data missing required fields (workflow_type, source_config, etc.)
-2. Airflow API not accessible from Control Plane container
+2. Airflow API not accessible from Kafka consumer container
 3. Integration doesn't exist in database
 
 ### High Consumer Lag
@@ -473,7 +473,7 @@ curl -u airflow:airflow http://localhost:8080/api/v1/dags
 
 **Solutions**:
 - Increase consumer timeout or max records per poll
-- Deploy multiple Control Plane instances (load distribution)
+- Deploy multiple Kafka consumer instances (load distribution)
 - Check for slow event processing (database queries, API calls)
 
 ### Duplicate DAG Triggers
@@ -481,7 +481,7 @@ curl -u airflow:airflow http://localhost:8080/api/v1/dags
 **Symptoms**: Same integration triggered multiple times
 
 **Causes**:
-- Multiple Control Plane instances with same consumer group (expected)
+- Multiple Kafka consumer instances with same consumer group (expected)
 - Consumer not committing offsets
 - Event published multiple times
 
@@ -604,10 +604,11 @@ class IntegrationCreatedEvent(BaseModel):
 
 The Kafka event-driven architecture implementation provides:
 
-✅ **Production-ready Kafka consumer service**
-- Runs in background thread
+✅ **Standalone Kafka consumer microservice (port 8001)**
+- Runs as an independent FastAPI service, decoupled from the Control Plane
 - Processes CDC events in real-time
 - Automatically triggers Airflow workflows
+- Health check endpoint at `/health/detailed`
 
 ✅ **Comprehensive test coverage**
 - Unit tests for consumer logic
@@ -621,8 +622,8 @@ The Kafka event-driven architecture implementation provides:
 - Future enhancement roadmap
 
 ✅ **Observability and monitoring**
-- Kafka UI for consumer groups
-- Detailed logging
+- Kafka UI for consumer groups (`cdc-consumer`)
+- Detailed logging via `docker-compose logs kafka-consumer`
 - Error handling
 
-The system is now event-driven, scalable, and ready for production use!
+The system is now event-driven, scalable, and ready for production use with a cleanly separated microservice architecture!

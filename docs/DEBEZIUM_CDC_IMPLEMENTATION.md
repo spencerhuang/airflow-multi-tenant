@@ -102,7 +102,9 @@ Step 4: Consumer processes CDC event → Triggers Airflow DAG
 
 ### 5. Enhanced Kafka Consumer Service ✅
 
-**File**: [`control_plane/app/services/kafka_consumer_service.py`](control_plane/app/services/kafka_consumer_service.py)
+**File**: [`kafka_consumer/app/services/kafka_consumer_service.py`](kafka_consumer/app/services/kafka_consumer_service.py)
+
+> **Note**: The Kafka consumer has been extracted from the control plane into a standalone FastAPI microservice (port 8001). All consumer-related logs are now under the `kafka-consumer` Docker service.
 
 Updated to handle both real Debezium CDC events and legacy manually-published events.
 
@@ -253,15 +255,15 @@ Updated to handle both real Debezium CDC events and legacy manually-published ev
 - **URL**: http://localhost:8081
 - View topics, messages, consumer groups
 - Monitor `cdc.integration.events` topic
-- Check `control-plane-consumer` group lag
+- Check `cdc-consumer` group lag
 
 ### Control Plane Logs
 ```bash
 # Watch CDC event processing
-docker-compose logs -f control-plane | grep "Processing Debezium CDC event"
+docker-compose logs -f kafka-consumer | grep "Processing Debezium CDC event"
 
 # Watch DAG triggers
-docker-compose logs -f control-plane | grep "Workflow triggered successfully"
+docker-compose logs -f kafka-consumer | grep "Workflow triggered successfully"
 ```
 
 ## Key Benefits
@@ -327,7 +329,7 @@ docker logs kafka-connect 2>&1 | tail -50
 
 **Check Consumer Logs**:
 ```bash
-docker-compose logs control-plane | grep -i kafka
+docker-compose logs kafka-consumer | grep -i kafka
 ```
 
 **Verify Consumer Running**:
@@ -335,19 +337,19 @@ docker-compose logs control-plane | grep -i kafka
 docker exec kafka kafka-consumer-groups \
   --bootstrap-server localhost:9092 \
   --describe \
-  --group control-plane-consumer
+  --group cdc-consumer
 ```
 
 ### Issue: DAG Not Triggering
 
 **Check Consumer Processed Event**:
 ```bash
-docker-compose logs control-plane | grep "Processing Debezium CDC event"
+docker-compose logs kafka-consumer | grep "Processing Debezium CDC event"
 ```
 
 **Verify execution_config Extraction**:
 ```bash
-docker-compose logs control-plane | grep "Extracted execution config"
+docker-compose logs kafka-consumer | grep "Extracted execution config"
 ```
 
 ## Files Created/Modified
@@ -359,7 +361,7 @@ docker-compose logs control-plane | grep "Extracted execution config"
 - `DEBEZIUM_CDC_IMPLEMENTATION.md` - This documentation
 
 ### Modified:
-- `control_plane/app/services/kafka_consumer_service.py` - Added Debezium event support
+- `kafka_consumer/app/services/kafka_consumer_service.py` - Debezium event support (extracted from control plane into standalone microservice)
 - `control_plane/tests/test_s3_to_mongo_e2e.py` - Updated to use real CDC
 - `control_plane/tests/test_integration_api_live.py` - Fixed foreign key constraint errors
 

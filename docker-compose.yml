@@ -309,33 +309,63 @@ services:
     volumes:
       - ./airflow:/sources
 
-  # Control Plane Service
+  # Control Plane Service (stateless REST API — no Kafka dependency)
   control-plane:
     build:
       context: .
       dockerfile: docker/Dockerfile.control-plane
     container_name: control-plane-service
     command: >
-      sh -c "cd control_plane && 
-             python -m alembic upgrade head && 
+      sh -c "cd control_plane &&
+             python -m alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     environment:
       DATABASE_URL: mysql+aiomysql://control_plane:control_plane@mysql:3306/control_plane
       AIRFLOW_API_URL: http://airflow-apiserver:8080/api/v2
       AIRFLOW_USERNAME: airflow
       AIRFLOW_PASSWORD: airflow
-      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
     ports:
       - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: always
+    volumes:
+      - ./control_plane:/app/control_plane
+      - ./connectors:/app/connectors
+      - ./packages/shared_models/shared_models:/app/shared_models
+      - ./packages/shared_utils/shared_utils:/app/shared_utils
+
+  # Kafka CDC Consumer Service (standalone stream processor)
+  kafka-consumer:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.kafka-consumer
+    container_name: kafka-consumer-service
+    command: >
+      uvicorn kafka_consumer.app.main:app --host 0.0.0.0 --port 8001 --reload
+    environment:
+      DATABASE_URL: mysql+pymysql://control_plane:control_plane@mysql:3306/control_plane
+      AIRFLOW_API_URL: http://airflow-apiserver:8080/api/v2
+      AIRFLOW_USERNAME: airflow
+      AIRFLOW_PASSWORD: airflow
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    ports:
+      - "8001:8001"
     depends_on:
       mysql:
         condition: service_healthy
       kafka:
         condition: service_healthy
     restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     volumes:
-      - ./control_plane:/app/control_plane
-      - ./connectors:/app/connectors
+      - ./kafka_consumer:/app/kafka_consumer
       - ./packages/shared_models/shared_models:/app/shared_models
       - ./packages/shared_utils/shared_utils:/app/shared_utils
 

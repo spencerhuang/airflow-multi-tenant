@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Kafka Consumer Service is a background service in the Control Plane that subscribes to CDC (Change Data Capture) events from Kafka and processes integration lifecycle events.
+The Kafka Consumer Service is a standalone FastAPI microservice (port 8001) that runs independently from the Control Plane and subscribes to CDC (Change Data Capture) events from Kafka and processes integration lifecycle events.
 
 ## Architecture
 
@@ -22,8 +22,8 @@ The Kafka Consumer Service is a background service in the Control Plane that sub
          │ Subscribes
          ↓
 ┌──────────────────┐
-│  Control Plane   │  KafkaConsumerService
-│  Kafka Consumer  │  (Background thread)
+│  Kafka Consumer  │  Standalone Microservice
+│                  │  (Background thread)
 └────────┬─────────┘
          │
          │ Processes events
@@ -38,8 +38,8 @@ The Kafka Consumer Service is a background service in the Control Plane that sub
 
 ### Location
 
-- **Service**: [control_plane/app/services/kafka_consumer_service.py](control_plane/app/services/kafka_consumer_service.py)
-- **Startup**: [control_plane/app/main.py](control_plane/app/main.py)
+- **Service**: [kafka_consumer/app/services/kafka_consumer_service.py](kafka_consumer/app/services/kafka_consumer_service.py)
+- **Startup**: [kafka_consumer/app/main.py](kafka_consumer/app/main.py)
 
 ### Key Components
 
@@ -59,7 +59,7 @@ class KafkaConsumerService:
         self,
         bootstrap_servers: str,
         topic: str,
-        group_id: str = "control-plane-consumer",
+        group_id: str = "cdc-consumer",
         event_handler: Optional[Callable] = None,
     ):
         ...
@@ -103,23 +103,16 @@ CDC events follow this structure:
 }
 ```
 
-#### 4. Application Lifecycle
+#### 4. Standalone Service Lifecycle
 
-The Kafka consumer is managed as part of the FastAPI application lifecycle:
+The Kafka consumer is managed via the modern FastAPI lifespan context manager:
 
-**Startup** ([main.py:38-50](control_plane/app/main.py#L38-L50)):
+**Lifespan** ([main.py](kafka_consumer/app/main.py)):
 ```python
-@app.on_event("startup")
-async def startup_event():
-    """Initialize Kafka consumer on application startup."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     initialize_kafka_consumer()
-```
-
-**Shutdown** ([main.py:53-65](control_plane/app/main.py#L53-L65)):
-```python
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Gracefully stop Kafka consumer on shutdown."""
+    yield
     shutdown_kafka_consumer()
 ```
 
@@ -127,14 +120,14 @@ async def shutdown_event():
 
 ### Environment Variables
 
-Configure Kafka connection in [control_plane/app/core/config.py](control_plane/app/core/config.py):
+Configure Kafka connection in [kafka_consumer/app/core/config.py](kafka_consumer/app/core/config.py):
 
 ```python
 KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
 KAFKA_TOPIC_CDC: str = "cdc.integration.events"
 ```
 
-In Docker Compose ([docker-compose.yml:269](docker-compose.yml#L269)):
+In Docker Compose, the `kafka-consumer` service:
 
 ```yaml
 environment:
@@ -143,7 +136,7 @@ environment:
 
 ### Consumer Settings
 
-- **Group ID**: `control-plane-consumer` - Allows multiple Control Plane instances to share workload
+- **Group ID**: `cdc-consumer` (configurable via `KAFKA_CONSUMER_GROUP`) - Allows multiple Kafka Consumer instances to share workload
 - **Auto Offset Reset**: `earliest` - Start from beginning on first run
 - **Auto Commit**: Enabled - Automatically commit offsets
 - **Consumer Timeout**: 1 second - For graceful shutdown
@@ -199,17 +192,17 @@ initialize_kafka_consumer(event_handler=my_event_handler)
 
 ## Running the Consumer
 
-### Start Control Plane Service
+### Start Kafka Consumer Service
 
-The Kafka consumer starts automatically when the Control Plane service starts:
+The Kafka consumer starts automatically as a standalone microservice:
 
 ```bash
 # Using Docker Compose
-docker-compose up -d control-plane
+docker-compose up -d kafka-consumer
 
 # Or locally
-cd control_plane
-python -m control_plane.app.main
+cd kafka_consumer
+python -m kafka_consumer.app.main
 ```
 
 ### Verify Consumer is Running
@@ -218,20 +211,23 @@ Check the logs:
 
 ```bash
 # Docker logs
-docker-compose logs -f control-plane
+docker-compose logs -f kafka-consumer
 
 # Expected output:
-# INFO:control_plane.app.services.kafka_consumer_service:Starting Kafka consumer for topic: cdc.integration.events
-# INFO:control_plane.app.services.kafka_consumer_service:Kafka consumer connected to kafka:29092
-# INFO:control_plane.app.services.kafka_consumer_service:Subscribed to topic: cdc.integration.events
-# INFO:control_plane.app.main:Kafka consumer initialized successfully
+# INFO:kafka_consumer.app.services.kafka_consumer_service:Starting Kafka consumer for topic: cdc.integration.events
+# INFO:kafka_consumer.app.services.kafka_consumer_service:Kafka consumer connected to kafka:29092
+# INFO:kafka_consumer.app.services.kafka_consumer_service:Subscribed to topic: cdc.integration.events
+# INFO:kafka_consumer.app.main:Kafka consumer initialized successfully
+
+# Health check
+curl http://localhost:8001/health/detailed
 ```
 
 ### Monitor with Kafka UI
 
 Open Kafka UI to view consumer activity: http://localhost:8081
 
-- **Consumer Groups**: View `control-plane-consumer` group
+- **Consumer Groups**: View `cdc-consumer` group
 - **Consumer Lag**: Check if consumer is keeping up with events
 - **Messages**: View CDC event messages
 
@@ -242,7 +238,7 @@ Open Kafka UI to view consumer activity: http://localhost:8081
 Test the consumer service in isolation:
 
 ```python
-from control_plane.app.services.kafka_consumer_service import KafkaConsumerService
+from kafka_consumer.app.services.kafka_consumer_service import KafkaConsumerService
 
 def test_event_processing():
     events_processed = []
@@ -269,7 +265,7 @@ def test_event_processing():
 
 ### Integration Tests
 
-The existing CDC tests in [control_plane/tests/test_cdc_kafka.py](control_plane/tests/test_cdc_kafka.py) verify Kafka connectivity and message publishing.
+The existing CDC tests in [kafka_consumer/tests/test_cdc_kafka.py](kafka_consumer/tests/test_cdc_kafka.py) verify Kafka connectivity and message publishing.
 
 To test the consumer:
 
@@ -278,7 +274,7 @@ To test the consumer:
 docker-compose up -d
 
 # Run CDC tests
-pytest control_plane/tests/test_cdc_kafka.py -v -s
+pytest kafka_consumer/tests/test_cdc_kafka.py -v -s
 ```
 
 ### Manual Testing
@@ -297,10 +293,10 @@ docker exec -it kafka kafka-console-producer \
 2. **View Consumer Logs**:
 
 ```bash
-docker-compose logs -f control-plane | grep "Processing CDC event"
+docker-compose logs -f kafka-consumer | grep "Processing CDC event"
 
 # Expected output:
-# INFO:control_plane.app.services.kafka_consumer_service:Processing CDC event: integration.created
+# INFO:kafka_consumer.app.services.kafka_consumer_service:Processing CDC event: integration.created
 ```
 
 ## Error Handling
@@ -375,9 +371,9 @@ docker-compose restart kafka
 **Symptoms**: Consumer group has high lag in Kafka UI
 
 **Solutions**:
-- Check Control Plane logs for processing errors
+- Check Kafka Consumer logs for processing errors
 - Increase consumer timeout or batch size
-- Deploy multiple Control Plane instances for load distribution
+- Deploy multiple Kafka Consumer instances for load distribution
 
 ### Issue: Events Not Being Consumed
 
@@ -397,19 +393,19 @@ docker exec kafka kafka-console-consumer \
 docker exec kafka kafka-consumer-groups \
   --bootstrap-server localhost:9092 \
   --describe \
-  --group control-plane-consumer
+  --group cdc-consumer
 ```
 
 ### Issue: Duplicate Event Processing
 
-**Cause**: Multiple Control Plane instances with same consumer group
+**Cause**: Multiple Kafka Consumer instances with same consumer group
 
 **Solution**: This is expected behavior. Kafka distributes partitions across consumers in the same group.
 
 If you need single-instance processing:
 ```python
 # Use a unique group ID per instance
-group_id=f"control-plane-consumer-{instance_id}"
+group_id=f"cdc-consumer-{instance_id}"
 ```
 
 ## Production Considerations
@@ -417,7 +413,7 @@ group_id=f"control-plane-consumer-{instance_id}"
 ### 1. Scalability
 
 For high-throughput scenarios:
-- Deploy multiple Control Plane instances
+- Deploy multiple Kafka Consumer instances
 - All instances join the same consumer group
 - Kafka automatically distributes partitions
 
@@ -490,12 +486,12 @@ def idempotent_handler(event_type: str, data: dict):
 2. **Add Retry Logic**: Implement exponential backoff for failed event processing
 3. **Alerting**: Send notifications for integration failures
 4. **Metrics**: Export consumer metrics to Prometheus/OpenTelemetry
-5. **Dead Letter Queue**: Move failed messages to DLQ for manual review
 
 ## Related Documentation
 
 - [E2E Test Guide](E2E_TEST_GUIDE.md)
 - [Testing Guide](TESTING.md)
-- [CDC Kafka Tests](control_plane/tests/test_cdc_kafka.py)
+- [CDC Kafka Tests](kafka_consumer/tests/test_cdc_kafka.py)
+- [Kafka Consumer Health](http://localhost:8001/health/detailed)
 - [Control Plane API](http://localhost:8000/docs)
 - [Kafka UI](http://localhost:8081)
