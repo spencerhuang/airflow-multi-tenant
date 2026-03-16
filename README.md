@@ -14,6 +14,22 @@ A scalable Airflow-based system supporting multi-tenancy and event-driven archit
 - **Hotspot detection**: There's a limit to max_active_runs, this tries to anticipate potential ceilings for scheduled workflows/dags
 - **Operational safety**: DST handling, backfill control, worker-slot efficiency
 
+## Product/Business statement
+
+What is it?
+
+- Use Case / Requirement
+The business use case defines a workflow: a workflow can be a transfer of data from any one system to another. In my use case, it’s the PDFs in AWS S3 to MongoDB. The workflow can be full-load on demand or scheduled daily load.
+
+- Approach
+On the surface, this sounds like something you can find templates from n8n’s community. However, once you factor in traceability and scalability, n8n feels more like an internal tool, as in I would not want to be the person standing in front of customers explaining why their scheduled DAG did not run, and I better have distributed tracing built-in from day one.
+
+Who is it for?
+Data Engineers, Product Owner, Data Scientists, ML Engineers, AI Engineers
+
+Why is it relevant?
+You need data to start your ingestion/training pipeline, regardless you're doing EDA or fine-tuning LLM. This project will bootstrap your data needs not just for the near-term, but robust enough to expand in the long run.
+
 ## Architecture Overview
 
 ```
