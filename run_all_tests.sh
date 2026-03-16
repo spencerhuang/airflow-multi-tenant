@@ -74,7 +74,7 @@ check_dependencies() {
     if ! python -c "import pytest" 2>/dev/null; then
         echo -e "${YELLOW}⚠ Installing test dependencies...${NC}"
         echo "This will install lightweight test dependencies (no Airflow)..."
-        pip install -r requirements-test.txt -q
+        uv pip install -r requirements-test.txt -q
         echo -e "${GREEN}✓ Dependencies installed${NC}"
     else
         echo -e "${GREEN}✓ Dependencies already installed${NC}"

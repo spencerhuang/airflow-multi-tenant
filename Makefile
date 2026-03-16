@@ -14,7 +14,7 @@ help:
 	@echo "  make lock-upgrade - Regenerate lock files with latest versions"
 
 install:
-	pip install -r requirements-dev.txt
+	uv pip install -r requirements-dev.txt
 
 test:
 	pytest
@@ -52,16 +52,16 @@ docker-logs:
 
 setup:
 	cp .env.example .env
-	pip install -r requirements-dev.txt
+	uv pip install -r requirements-dev.txt
 	@echo "Setup complete! Edit .env file with your configuration."
 
 lock:
-	pip-compile --generate-hashes --allow-unsafe --output-file requirements-lock.txt requirements.txt
-	pip-compile --generate-hashes --allow-unsafe --output-file requirements-control-plane-lock.txt requirements-control-plane.txt
+	uv pip compile --generate-hashes --output-file requirements-lock.txt requirements.txt
+	uv pip compile --generate-hashes --output-file requirements-control-plane-lock.txt requirements-control-plane.txt
 
 lock-upgrade:
-	pip-compile --generate-hashes --allow-unsafe --upgrade --output-file requirements-lock.txt requirements.txt
-	pip-compile --generate-hashes --allow-unsafe --upgrade --output-file requirements-control-plane-lock.txt requirements-control-plane.txt
+	uv pip compile --generate-hashes --upgrade --output-file requirements-lock.txt requirements.txt
+	uv pip compile --generate-hashes --upgrade --output-file requirements-control-plane-lock.txt requirements-control-plane.txt
 
 # Quick start for local development
 dev:
