@@ -129,14 +129,14 @@ docker-compose up -d
 
 ```bash
 # Full environment (with Airflow)
-pip install -r requirements.txt
-pip install -r requirements-dev.txt
+uv pip install -r requirements.txt
+uv pip install -r requirements-dev.txt
 
 # Testing only (no Airflow, faster)
-pip install -r requirements-test.txt
+uv pip install -r requirements-test.txt
 
 # Control plane only (no Airflow)
-pip install -r requirements-control-plane.txt
+uv pip install -r requirements-control-plane.txt
 ```
 
 ### Docker

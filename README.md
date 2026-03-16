@@ -18,12 +18,14 @@ A scalable Airflow-based system supporting multi-tenancy and event-driven archit
 
 What is it?
 
-The business use case defines a workflow: a workflow can be a transfer of data from any one system to another. In my use case, it’s the PDFs in AWS S3 to MongoDB. The workflow can be full-load on demand or scheduled daily load. On the surface, this sounds like something you can find templates from n8n’s community. However, once you factor in traceability and scalability, n8n feels more like an internal tool, as in I would not want to be the person standing in front of customers explaining why their scheduled workflow/DAG did not run.
+At its core, every business use case becomes a workflow, moving data from one system to another so it can create value. In my case, that means taking PDFs stored in AWS S3 and transforming them into structured data in MongoDB, either through a one time full load or a daily scheduled pipeline. On the surface, this looks like something you could quickly assemble using community templates from tools like n8n. But once the workflow becomes business critical, the real challenges emerge: traceability, observability, and reliable execution at scale. At that point, tools like n8n start to feel more like internal productivity utilities rather than production infrastructure, especially if you are the one who has to explain to customers why yesterday’s scheduled workflow did not run.
 
 Who is it for?
-Data Engineers, Product Owner/Manager, Data Scientists, ML Engineers, AI Engineers, Business Analysts
+
+Data Engineers, Product Owner/Manager, Data Scientists, ML Engineers, AI Engineers, Business Analysts in Academic or Small Medium Business.
 
 Why is it relevant?
+
 Regardless you're doing EDA or fine-tuning LLM, you need data to start your ingestion/training pipeline. This project will bootstrap your data needs not just for the near-term, but robust enough to expand in the long run.
 
 ## Architecture Overview
@@ -83,20 +85,28 @@ Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Kafka Consumer Service (sta
 
 - Docker and Docker Compose
 - Python 3.11+
+- [uv](https://docs.astral.sh/uv/) (fast Python package manager)
 
 ### Local Development
 
-1. Install shared packages:
+1. Install uv (if you haven't already):
 ```bash
-pip install -e packages/shared_models -e packages/shared_utils
+curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-2. Start the local stack:
+2. Create a virtual environment and install dependencies (not utilizing uv workspace for reasons):
+```bash
+uv venv --python 3.11
+source .venv/bin/activate
+uv pip install -r requirements-dev.txt
+```
+
+3. Start the local stack:
 ```bash
 docker-compose up -d
 ```
 
-3. Access services:
+4. Access services:
 - Airflow UI: http://localhost:8080
 - Control Plane API: http://localhost:8000
 - API Documentation: http://localhost:8000/docs

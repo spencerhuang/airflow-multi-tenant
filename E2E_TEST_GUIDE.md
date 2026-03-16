@@ -56,7 +56,7 @@ The test now validates the complete event-driven pipeline:
 The test requires additional packages:
 
 ```bash
-pip install minio boto3 pymongo kafka-python
+uv pip install minio boto3 pymongo kafka-python
 ```
 
 Or update requirements:
@@ -66,7 +66,7 @@ echo "minio" >> requirements-dev.txt
 echo "boto3" >> requirements-dev.txt
 echo "pymongo" >> requirements-dev.txt
 echo "kafka-python" >> requirements-dev.txt
-pip install -r requirements-dev.txt
+uv pip install -r requirements-dev.txt
 ```
 
 ### 2. Start All Docker Services
@@ -292,7 +292,7 @@ curl http://localhost:8000/api/v1/integrations/1
 
 **Solution:**
 ```bash
-pip install minio boto3 pymongo
+uv pip install minio boto3 pymongo
 ```
 
 ### Issue: "Could not connect to Airflow API"

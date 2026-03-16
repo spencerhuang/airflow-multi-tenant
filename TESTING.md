@@ -6,7 +6,7 @@ This guide explains how to run all tests for the Multi-Tenant Airflow Architectu
 
 1. **Docker Desktop or OrbStack** must be installed and running
 2. **Python 3.11+** with virtual environment set up
-3. **Dependencies installed**: Run `pip install -r requirements-dev.txt` (this includes the shared packages from `packages/`)
+3. **Dependencies installed**: Run `uv pip install -r requirements-dev.txt` (this includes the shared packages from `packages/`)
 
 ## Quick Start
 
