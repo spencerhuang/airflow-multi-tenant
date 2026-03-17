@@ -149,7 +149,7 @@ A lightweight Java interceptor (`TraceparentInterceptor`) injects a `traceparent
 
 Traceparent headers are visible in Kafka UI and propagated through Airflow XCom:
 
-![Distributed tracing — Kafka UI traceparent header and Airflow XCom](docs/Screenshot%202026-03-17%20at%201.37.45%20PM.png)
+![Distributed tracing — Kafka UI traceparent header and Airflow XCom](docs/docs/Screenshot2026-03-17at1.37.45PM.png.png)
 
 **Disclaimer:** Trace IDs live only in Kafka headers, structured logs, and Airflow XCom — they are not persisted to the database (e.g., `integration_runs`). 
 
