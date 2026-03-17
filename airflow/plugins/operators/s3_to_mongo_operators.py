@@ -59,13 +59,13 @@ class PrepareS3ToMongoTask(PrepareTask):
         Returns:
             Configuration dictionary for downstream tasks (no secrets)
         """
-        dag_run_conf = context["dag_run"].conf or {}
+        dag_run = context.get("dag_run")
+        dag_run_conf = (dag_run.conf if dag_run else None) or {}
         ti = context["ti"]
-        dag_run = context["dag_run"]
 
         trace_ctx = self._get_trace_context(context)
         trace_id = trace_ctx.trace_id
-        dag_run_id = dag_run.run_id
+        dag_run_id = dag_run.run_id if dag_run else "unknown"
         ti.xcom_push(key="traceparent", value=trace_ctx.traceparent)
 
         integration_id = dag_run_conf.get("integration_id")
@@ -143,7 +143,7 @@ class ValidateS3ToMongoTask(ValidateTask):
         # Pull configuration and credentials from XCom
         ti = context["ti"]
         trace_id = self._get_trace_context(context).trace_id
-        dag_run_id = context["dag_run"].run_id
+        dag_run_id = context.get("dag_run").run_id if context.get("dag_run") else "unknown"
         config = ti.xcom_pull(task_ids="prepare")
         credentials = ti.xcom_pull(task_ids="prepare", key="credentials")
 
@@ -237,7 +237,7 @@ class ExecuteS3ToMongoTask(TraceIdMixin, BaseOperator):
         # Pull configuration and credentials from XCom
         ti = context["ti"]
         trace_id = self._get_trace_context(context).trace_id
-        dag_run_id = context["dag_run"].run_id
+        dag_run_id = context.get("dag_run").run_id if context.get("dag_run") else "unknown"
         config = ti.xcom_pull(task_ids="prepare")
         credentials = ti.xcom_pull(task_ids="prepare", key="credentials")
 
@@ -411,7 +411,7 @@ class CleanUpS3ToMongoTask(CleanUpTask):
             context: Airflow task context
         """
         ti = context["ti"]
-        dag_run = context["dag_run"]
+        dag_run = context.get("dag_run")
         trace_id = self._get_trace_context(context).trace_id
 
         # Pull XCom data — may be None if upstream tasks failed
@@ -449,7 +449,7 @@ class CleanUpS3ToMongoTask(CleanUpTask):
     def _clear_sensitive_xcom(self, context: Dict[str, Any], trace_id: str, dag_run_id: str) -> None:
         """Delete the 'credentials' XCom key pushed by PrepareTask."""
         try:
-            dag_run = context["dag_run"]
+            dag_run = context.get("dag_run")
             ti = context["ti"]
             session = ti.get_session()
 
@@ -483,7 +483,7 @@ class CleanUpS3ToMongoTask(CleanUpTask):
 
         try:
             ti = context["ti"]
-            dag_run = context["dag_run"]
+            dag_run = context.get("dag_run")
             dag_run_id = dag_run.run_id
 
             # Collect errors from XCom (detailed messages pushed by upstream tasks)
@@ -567,7 +567,7 @@ class CleanUpS3ToMongoTask(CleanUpTask):
         covered_task_ids = {e["task_id"] for e in xcom_errors}
 
         try:
-            dag_run = context["dag_run"]
+            dag_run = context.get("dag_run")
             task_instances = dag_run.get_task_instances()
 
             for task_instance in task_instances:
@@ -584,7 +584,7 @@ class CleanUpS3ToMongoTask(CleanUpTask):
                             })
         except Exception as e:
             trace_id = self._get_trace_context(context).trace_id
-            dag_run_id = context["dag_run"].run_id
+            dag_run_id = context.get("dag_run").run_id if context.get("dag_run") else "unknown"
             self.log.warning(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Could not check upstream task states: {e}")
             errors.append({
                 "task_id": "cleanup",

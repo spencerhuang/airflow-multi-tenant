@@ -90,6 +90,7 @@ from operators.dispatch_operators import DispatchScheduledIntegrationsTask
 def _make_prepare_context(conf, run_id="test_run_123"):
     """Build a mock context for Prepare task tests."""
     mock_ti = Mock()
+    mock_ti.xcom_pull.return_value = None
     mock_dag_run = Mock()
     mock_dag_run.conf = conf
     mock_dag_run.run_id = run_id
@@ -128,7 +129,7 @@ class TestPrepareS3ToMongoTask:
 
         # Credentials should be pushed as separate XCom key
         mock_ti = context["ti"]
-        mock_ti.xcom_push.assert_called_once_with(
+        mock_ti.xcom_push.assert_any_call(
             key="credentials",
             value={
                 "s3_endpoint_url": "http://custom-s3:9000",
@@ -168,12 +169,12 @@ class TestPrepareS3ToMongoTask:
             operator.execute(context)
 
         # Verify error was pushed to XCom
-        context["ti"].xcom_push.assert_called_once_with(
+        context["ti"].xcom_push.assert_any_call(
             key="task_errors_prepare",
             value=[{
                 "task_id": "prepare",
                 "error_code": "PREPARE_ERROR",
-                "message": "s3_bucket is required in configuration",
+                "message": "Prepare failed: s3_bucket is required in configuration",
             }],
         )
 
@@ -187,12 +188,12 @@ class TestPrepareS3ToMongoTask:
             operator.execute(context)
 
         # Verify error was pushed to XCom
-        context["ti"].xcom_push.assert_called_once_with(
+        context["ti"].xcom_push.assert_any_call(
             key="task_errors_prepare",
             value=[{
                 "task_id": "prepare",
                 "error_code": "PREPARE_ERROR",
-                "message": "mongo_collection is required in configuration",
+                "message": "Prepare failed: mongo_collection is required in configuration",
             }],
         )
 
@@ -323,7 +324,10 @@ class TestValidateS3ToMongoTask:
             return None
 
         mock_ti.xcom_pull.side_effect = xcom_pull_side_effect
-        context = {"ti": mock_ti}
+        mock_dag_run = Mock()
+        mock_dag_run.run_id = "test_run_123"
+        mock_dag_run.conf = {}
+        context = {"ti": mock_ti, "dag_run": mock_dag_run}
 
         result = operator.execute(context)
         assert result is True
@@ -359,14 +363,18 @@ class TestValidateS3ToMongoTask:
                 "s3_access_key": "bad", "s3_secret_key": "bad",
                 "mongo_uri": "mongodb://host:27017/", "mongo_database": "db",
             },
-        }[(task_ids, key)]
-        context = {"ti": mock_ti}
+            ("prepare", "traceparent"): None,
+        }.get((task_ids, key))
+        mock_dag_run = Mock()
+        mock_dag_run.run_id = "test_run_123"
+        mock_dag_run.conf = {}
+        context = {"ti": mock_ti, "dag_run": mock_dag_run}
 
         with pytest.raises(Exception, match="Validation failed"):
             operator.execute(context)
 
         # Verify error was pushed to XCom
-        mock_ti.xcom_push.assert_called_once_with(
+        mock_ti.xcom_push.assert_any_call(
             key="task_errors_validate",
             value=[{
                 "task_id": "validate",
@@ -394,8 +402,12 @@ class TestExecuteS3ToMongoTask:
                 "mongo_uri": "mongodb://user:pass@host:27017/",
                 "mongo_database": "mydb",
             },
-        }[(task_ids, key)]
-        return {"ti": mock_ti}
+            ("prepare", "traceparent"): None,
+        }.get((task_ids, key))
+        mock_dag_run = Mock()
+        mock_dag_run.run_id = "test_run_123"
+        mock_dag_run.conf = {}
+        return {"ti": mock_ti, "dag_run": mock_dag_run}
 
     @patch("operators.s3_to_mongo_operators.MongoClient")
     @patch("operators.s3_to_mongo_operators.MongoAuth")

@@ -85,6 +85,30 @@ TEST_BUCKET = "test-s3-to-mongo"
 TEST_PREFIX = "data/"
 TEST_COLLECTION = "test_s3_data"
 
+# Unique per session to avoid stale DAG run matches across test runs
+TEST_WORKSPACE_ID = "test-e2e-ws-" + uuid.uuid4().hex[:8]
+TEST_CUSTOMER_GUID = "test-e2e-cust-" + uuid.uuid4().hex[:8]
+
+
+def _cleanup_airflow_dag_runs(dag_id, workspace_pattern):
+    """Delete all Airflow DAG runs whose dag_run_id contains workspace_pattern."""
+    try:
+        headers = get_airflow_auth_headers()
+        r = requests.get(
+            f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns",
+            headers=headers, timeout=10,
+            params={"limit": 100},
+        )
+        if r.status_code == 200:
+            for run in r.json().get("dag_runs", []):
+                if workspace_pattern in run.get("dag_run_id", ""):
+                    requests.delete(
+                        f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns/{run['dag_run_id']}",
+                        headers=headers, timeout=10,
+                    )
+    except Exception:
+        pass
+
 
 @pytest.fixture(scope="session")
 def wait_for_services():
@@ -234,16 +258,19 @@ def setup_database(wait_for_services):
             conn.execute(text("DELETE FROM workspaces WHERE workspace_id LIKE 'test-e2e-%'"))
             conn.execute(text("DELETE FROM customers WHERE customer_guid LIKE 'test-e2e-%'"))
 
+        # Clean up stale Airflow DAG runs from previous test sessions
+        _cleanup_airflow_dag_runs("s3_to_mongo_ondemand", "test-e2e-")
+
         # Create test data
-        customer = Customer(customer_guid="test-e2e-cust", name="E2E Test Customer", max_integration=100)
+        customer = Customer(customer_guid=TEST_CUSTOMER_GUID, name="E2E Test Customer", max_integration=100)
         db.add(customer)
 
-        workspace = Workspace(workspace_id="test-e2e-ws", customer_guid="test-e2e-cust")
+        workspace = Workspace(workspace_id=TEST_WORKSPACE_ID, customer_guid=TEST_CUSTOMER_GUID)
         db.add(workspace)
 
         # S3 credentials (source)
         s3_auth = Auth(
-            workspace_id="test-e2e-ws",
+            workspace_id=TEST_WORKSPACE_ID,
             auth_type="aws_iam",
             json_data=json.dumps({
                 "s3_endpoint_url": "http://minio:9000",  # Docker internal
@@ -255,7 +282,7 @@ def setup_database(wait_for_services):
 
         # MongoDB credentials (destination)
         mongo_auth = Auth(
-            workspace_id="test-e2e-ws",
+            workspace_id=TEST_WORKSPACE_ID,
             auth_type="mongodb",
             json_data=json.dumps({
                 "mongo_uri": "mongodb://root:root@mongodb:27017/",
@@ -285,12 +312,14 @@ def setup_database(wait_for_services):
 
         auth_id = s3_auth.auth_id
 
-        yield {"workspace_id": "test-e2e-ws", "auth_id": auth_id}
+        yield {"workspace_id": TEST_WORKSPACE_ID, "auth_id": auth_id}
 
     finally:
         # Cleanup using a fresh connection to avoid ORM session state issues
         try:
             db.close()
+            # Clean up Airflow DAG runs for this session
+            _cleanup_airflow_dag_runs("s3_to_mongo_ondemand", TEST_WORKSPACE_ID)
             with engine.begin() as conn:
                 from sqlalchemy import text
                 # Delete in FK order: errors → runs → integrations → auth → workspace → customer
@@ -448,10 +477,11 @@ class TestS3ToMongoEndToEnd:
             if response.status_code == 200:
                 dag_runs = response.json().get("dag_runs", [])
 
-                # Find runs with our test workspace in the run_id
+                # Find runs with our test workspace created after the trigger time
                 test_runs = [
                     run for run in dag_runs
-                    if "test-e2e-ws" in run.get("dag_run_id", "")
+                    if TEST_WORKSPACE_ID in run.get("dag_run_id", "")
+                    and run.get("queued_at", "") > trigger_time.isoformat()
                 ]
 
                 if test_runs:
@@ -585,7 +615,7 @@ class TestS3ToMongoEndToEnd:
         response = requests.get(f"{API_BASE_URL}/api/v1/integrations/")
         if response.status_code == 200:
             integrations = response.json()
-            e2e_integrations = [i for i in integrations if i.get('workspace_id') == 'test-e2e-ws']
+            e2e_integrations = [i for i in integrations if i.get('workspace_id') == TEST_WORKSPACE_ID]
             print(f"\n3. Integration Configuration:")
             print(f"   ✓ Integrations created: {len(e2e_integrations)}")
 

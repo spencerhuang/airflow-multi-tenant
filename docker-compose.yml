@@ -162,6 +162,7 @@ services:
       dockerfile: docker/Dockerfile.kafka-connect
     platform: linux/amd64
     container_name: kafka-connect
+    mem_limit: 1536m
     depends_on:
       kafka:
         condition: service_healthy
@@ -172,8 +173,7 @@ services:
     environment:
       BOOTSTRAP_SERVERS: kafka:29092
       GROUP_ID: debezium-cluster
-      KAFKA_OPTS: "-Xmx512m -Xms256m"
-      KAFKA_HEAP_OPTS: "-Xmx512m -Xms256m"
+      KAFKA_HEAP_OPTS: "-Xmx768m -Xms256m"
       CONFIG_STORAGE_TOPIC: connect_configs
       OFFSET_STORAGE_TOPIC: connect_offsets
       STATUS_STORAGE_TOPIC: connect_status

@@ -55,7 +55,8 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
         self.integration_type = integration_type
 
     def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        dag_run_id = context["dag_run"].run_id
+        dag_run = context.get("dag_run")
+        dag_run_id = dag_run.run_id if dag_run else "unknown"
         trace_ctx = TraceContext.new()
         trace_id = trace_ctx.trace_id
         config = get_control_plane_config()

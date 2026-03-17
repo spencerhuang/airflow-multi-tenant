@@ -40,7 +40,7 @@ class TraceIdMixin:
                 traceparent = ti.xcom_pull(task_ids="prepare", key="traceparent") or ""
 
         # Parse or generate new
-        if traceparent:
+        if traceparent and isinstance(traceparent, str):
             try:
                 return TraceContext.from_traceparent(traceparent)
             except ValueError:

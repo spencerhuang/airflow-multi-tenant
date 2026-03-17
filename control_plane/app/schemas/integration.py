@@ -15,7 +15,7 @@ class IntegrationBase(BaseModel):
     dest_access_pt_id: int = Field(..., description="Destination access point identifier")
     integration_type: str = Field(..., description="Integration type (e.g., 'S3ToMongo')")
     usr_sch_cron: Optional[str] = Field(None, description="User's cron schedule in local timezone")
-    usr_timezone: str = Field("UTC", description="User's IANA timezone")
+    usr_timezone: Optional[str] = Field("UTC", description="User's IANA timezone")
     schedule_type: str = Field("on_demand", description="Schedule type: daily, weekly, monthly, on_demand, cdc")
     json_data: Optional[str] = Field(None, description="Additional configuration as JSON")
 

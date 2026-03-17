@@ -69,7 +69,7 @@ def kafka_consumer(wait_for_kafka):
         auto_offset_reset="earliest",
         enable_auto_commit=True,
         group_id=f"test-group-{datetime.now().timestamp()}",
-        value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+        value_deserializer=lambda m: json.loads(m.decode("utf-8")) if m is not None else None,
         consumer_timeout_ms=5000,
     )
     yield consumer
@@ -126,6 +126,8 @@ class TestCDCEvents:
         # Receive event
         messages = []
         for message in kafka_consumer:
+            if message.value is None:
+                continue
             messages.append(message.value)
             if message.value.get("event_type") == "integration.created":
                 break
@@ -164,6 +166,8 @@ class TestCDCEvents:
         # Receive event
         messages = []
         for message in kafka_consumer:
+            if message.value is None:
+                continue
             messages.append(message.value)
             if message.value.get("event_type") == "integration.updated":
                 break
