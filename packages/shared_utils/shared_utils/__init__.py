@@ -11,6 +11,7 @@ from shared_utils.task_error_tracking import (
 )
 from shared_utils.integration_run import create_integration_run
 from shared_utils.db import create_control_plane_engine, DEFAULT_DB_CONNECT_TIMEOUT
+from shared_utils.trace_context import TraceContext
 
 __all__ = [
     "TimezoneConverter",
@@ -23,4 +24,5 @@ __all__ = [
     "create_integration_run",
     "create_control_plane_engine",
     "DEFAULT_DB_CONNECT_TIMEOUT",
+    "TraceContext",
 ]

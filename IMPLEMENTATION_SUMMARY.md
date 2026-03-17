@@ -707,6 +707,105 @@ make lock-upgrade  # Upgrade and regenerate lock files
 
 ---
 
+## Distributed Tracing: W3C Traceparent via Custom Kafka Connect Image
+
+### The Problem
+
+When a CDC event flows through **Debezium → Kafka → Consumer → Airflow**, there is no way to correlate log lines across these services. A single integration trigger can produce logs in four different processes, and without a shared identifier, debugging requires manual timestamp correlation — slow, error-prone, and impossible at scale.
+
+### Why W3C Traceparent (Not OpenTelemetry SDK)
+
+The standard approach would be to add the OpenTelemetry Java SDK to Kafka Connect. We rejected this because:
+
+1. **Heavyweight dependency** — The OTEL SDK pulls in `opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-*`, and their transitive dependencies, significantly increasing the Kafka Connect image size and startup time.
+2. **Exporter infrastructure required** — OTEL expects a collector (Jaeger, Zipkin, OTLP) to receive spans. We don't need span visualization yet — we need **log correlation**.
+3. **Version conflicts** — Debezium bundles its own dependency tree; adding OTEL jars risks classpath conflicts with Kafka Connect's existing libraries.
+4. **Overkill for the use case** — We only need a unique `trace_id` attached to each CDC message. A full tracing SDK with span hierarchies, sampling, and export pipelines is unnecessary overhead.
+
+### The Solution: Custom `TraceparentInterceptor` + Custom Docker Image
+
+Kafka Connect supports **producer interceptors** — classes that modify every `ProducerRecord` before it hits the broker. We wrote a zero-dependency Java interceptor that:
+
+1. Generates a W3C-compliant `traceparent` header (`00-<trace_id>-<span_id>-01`)
+2. Injects it into the Kafka message headers on every `onSend()`
+3. Requires no OTEL SDK, no collector, no external dependencies beyond `kafka-clients` (already on the classpath)
+
+**Why a custom Docker image?** The interceptor is a `.jar` that must be on Kafka Connect's classpath at `/kafka/libs/`. The stock `debezium/connect` image doesn't include it, so we build a derived image:
+
+```
+docker/Dockerfile.kafka-connect (multi-stage)
+├── Stage 1: eclipse-temurin:21-jdk — compiles TraceparentInterceptor.java → .jar
+└── Stage 2: debezium/connect:3.0.0.Final — copies the .jar into /kafka/libs/
+```
+
+This keeps the production image minimal (only adds ~3KB) while the JDK build tools stay in the discarded builder stage.
+
+### How Trace Context Flows End-to-End
+
+```
+┌──────────────────────┐
+│  MySQL CDC Change     │
+└──────────┬───────────┘
+           ↓
+┌──────────────────────┐
+│  Debezium Connector   │
+│  (Kafka Connect)      │
+│                       │
+│  TraceparentInterceptor.onSend()
+│  → Generates traceparent header
+│  → Injects into Kafka message headers
+└──────────┬───────────┘
+           ↓  (Kafka message with traceparent header)
+┌──────────────────────┐
+│  Kafka Consumer       │
+│  Service              │
+│                       │
+│  _extract_trace_context(record)
+│  → TraceContext.from_kafka_headers()
+│  → Parses traceparent → trace_id
+│  → Attaches trace_id to all log lines
+│  → Passes traceparent in Airflow DAG conf
+└──────────┬───────────┘
+           ↓  (Airflow REST API: conf.traceparent)
+┌──────────────────────┐
+│  Airflow DAG Tasks    │
+│                       │
+│  TraceIdMixin._get_trace_context()
+│  → Reads traceparent from dag_run.conf
+│  → Falls back to XCom (pushed by PrepareTask)
+│  → Prefixes all log lines with [trace_id=...]
+└──────────────────────┘
+```
+
+### Files Involved
+
+| File | Role |
+|---|---|
+| `docker/kafka-interceptor/src/io/debezium/tracing/TraceparentInterceptor.java` | Java interceptor — generates and injects W3C traceparent headers |
+| `docker/Dockerfile.kafka-connect` | Multi-stage build: compile interceptor → derive from debezium/connect |
+| `docker-compose.yml` | `kafka-connect` service: `build:` replaces `image:`, adds `CONNECT_PRODUCER_INTERCEPTOR_CLASSES` env var |
+| `packages/shared_utils/shared_utils/trace_context.py` | Python `TraceContext` class — parses/generates W3C traceparent strings |
+| `packages/shared_utils/shared_utils/__init__.py` | Exports `TraceContext` from `shared_utils` |
+| `kafka_consumer/app/services/kafka_consumer_service.py` | Extracts traceparent from Kafka headers, threads trace_id through all log lines and Airflow DAG conf |
+| `kafka_consumer/app/core/logging.py` | `JSONFormatter` emits `trace_id` field in structured logs |
+| `airflow/plugins/operators/base_operators.py` | `TraceIdMixin` — extracts traceparent from dag_run conf or XCom for all task operators |
+| `airflow/plugins/operators/s3_to_mongo_operators.py` | All tasks (Prepare/Validate/Execute/CleanUp) prefix logs with `[trace_id=...]` |
+| `airflow/plugins/operators/dispatch_operators.py` | `DispatchScheduledIntegrationsTask` generates a fresh traceparent for scheduler-triggered DAGs |
+
+### Key Design Decisions
+
+1. **Per-message trace_id (not per-connector)** — Each CDC event gets its own trace_id, so you can grep a single integration trigger across all services.
+
+2. **Fallback to `TraceContext.new()`** — If the traceparent header is missing (e.g., manual Airflow trigger, legacy messages), a fresh context is generated rather than failing. Tracing is always-on, never blocking.
+
+3. **Two propagation paths into Airflow** — `dag_run.conf.traceparent` (set by Kafka consumer) is the primary path. `XCom` (pushed by PrepareTask) is the fallback for downstream tasks that can't access dag_run conf directly.
+
+4. **Scheduler-triggered DAGs get tracing too** — `DispatchScheduledIntegrationsTask` calls `TraceContext.new().traceparent` so scheduled runs (not triggered by Kafka) still have a trace_id for log correlation.
+
+5. **`CONNECT_PRODUCER_INTERCEPTOR_CLASSES` env var** — Kafka Connect applies the interceptor to all connectors in the cluster without modifying individual connector configs. One setting, all CDC topics get traceparent headers.
+
+---
+
 ## Summary
 
 ✅ **Extracted**: Kafka consumer into standalone FastAPI microservice (port 8001)

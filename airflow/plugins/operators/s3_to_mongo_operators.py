@@ -10,7 +10,7 @@ from airflow.models import XCom
 from sqlalchemy import select
 
 # Use relative import within plugins directory
-from operators.base_operators import PrepareTask, ValidateTask, CleanUpTask
+from operators.base_operators import PrepareTask, ValidateTask, CleanUpTask, TraceIdMixin
 
 # Import reusable connectors
 from connectors.s3.auth import S3Auth
@@ -63,8 +63,13 @@ class PrepareS3ToMongoTask(PrepareTask):
         ti = context["ti"]
         dag_run = context["dag_run"]
 
+        trace_ctx = self._get_trace_context(context)
+        trace_id = trace_ctx.trace_id
+        dag_run_id = dag_run.run_id
+        ti.xcom_push(key="traceparent", value=trace_ctx.traceparent)
+
         integration_id = dag_run_conf.get("integration_id")
-        self.log.info(f"Preparing S3 to MongoDB integration: {integration_id}")
+        self.log.info(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Preparing S3 to MongoDB integration: {integration_id}")
 
         # Create IntegrationRun record FIRST — must exist before any logic
         # that could fail, so CleanUp always has a row to update.
@@ -82,8 +87,8 @@ class PrepareS3ToMongoTask(PrepareTask):
             if not mongo_collection:
                 raise ValueError("mongo_collection is required in configuration")
 
-            self.log.info(f"S3 bucket: {s3_bucket}, prefix: {s3_prefix}")
-            self.log.info(f"MongoDB collection: {mongo_collection}")
+            self.log.info(f"[trace_id={trace_id}] S3 bucket: {s3_bucket}, prefix: {s3_prefix}")
+            self.log.info(f"[trace_id={trace_id}] MongoDB collection: {mongo_collection}")
 
             # Push credentials to a separate XCom key so downstream tasks
             # can use them without exposing secrets in the default return value.
@@ -95,7 +100,7 @@ class PrepareS3ToMongoTask(PrepareTask):
                 "mongo_database": dag_run_conf.get("mongo_database", "test_database"),
             }
             ti.xcom_push(key="credentials", value=credentials)
-            self.log.info("Credentials pushed to XCom (separate key)")
+            self.log.info(f"[trace_id={trace_id}] Credentials pushed to XCom (separate key)")
 
             # Return non-sensitive config (default XCom)
             return {
@@ -107,8 +112,9 @@ class PrepareS3ToMongoTask(PrepareTask):
 
         except Exception as e:
             # Push error to XCom so CleanUp can persist it
+            self.log.error(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Prepare failed: {e}", exc_info=True)
             push_task_errors(ti, "prepare", [
-                {"error_code": "PREPARE_ERROR", "message": str(e)},
+                {"error_code": "PREPARE_ERROR", "message": f"Prepare failed: {e}"},
             ], log=self.log)
             raise
 
@@ -136,10 +142,12 @@ class ValidateS3ToMongoTask(ValidateTask):
         """
         # Pull configuration and credentials from XCom
         ti = context["ti"]
+        trace_id = self._get_trace_context(context).trace_id
+        dag_run_id = context["dag_run"].run_id
         config = ti.xcom_pull(task_ids="prepare")
         credentials = ti.xcom_pull(task_ids="prepare", key="credentials")
 
-        self.log.info(f"Validating S3 to MongoDB configuration: {config}")
+        self.log.info(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Validating S3 to MongoDB configuration: {config}")
 
         s3_bucket = config["s3_bucket"]
         s3_prefix = config.get("s3_prefix", "")
@@ -153,7 +161,7 @@ class ValidateS3ToMongoTask(ValidateTask):
 
         try:
             # 1. Validate S3 bucket is accessible using connector
-            self.log.info(f"Validating S3 bucket {s3_bucket} with prefix {s3_prefix}")
+            self.log.info(f"[trace_id={trace_id}] Validating S3 bucket {s3_bucket} with prefix {s3_prefix}")
             s3_auth = S3Auth(
                 aws_access_key_id=s3_access_key,
                 aws_secret_access_key=s3_secret_key,
@@ -164,10 +172,10 @@ class ValidateS3ToMongoTask(ValidateTask):
 
             # Try to list objects to verify access
             objects = s3_client.list_objects(s3_bucket, s3_prefix, max_keys=1)
-            self.log.info(f"✓ S3 bucket accessible, found objects: {len(objects) > 0}")
+            self.log.info(f"[trace_id={trace_id}] S3 bucket accessible, found objects: {len(objects) > 0}")
 
             # 2. Validate MongoDB connection using connector
-            self.log.info("Validating MongoDB connection")
+            self.log.info(f"[trace_id={trace_id}] Validating MongoDB connection")
             if "@" in mongo_uri:
                 auth_part = mongo_uri.split("@")[0].replace("mongodb://", "")
                 host_part = mongo_uri.split("@")[1].rstrip("/")
@@ -192,21 +200,21 @@ class ValidateS3ToMongoTask(ValidateTask):
             # Test connection by listing collections
             mongo_client.db.list_collection_names()
             mongo_client.close()
-            self.log.info("✓ MongoDB connection successful")
+            self.log.info(f"[trace_id={trace_id}] MongoDB connection successful")
 
-            self.log.info("✓ Validation successful")
+            self.log.info(f"[trace_id={trace_id}] Validation successful")
             return True
 
         except Exception as e:
             error_msg = f"Validation failed: {str(e)}"
-            self.log.error(error_msg)
+            self.log.error(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] {error_msg}", exc_info=True)
             push_task_errors(ti, "validate", [
                 {"error_code": "VALIDATION_ERROR", "message": error_msg},
             ], log=self.log)
             raise Exception(error_msg)
 
 
-class ExecuteS3ToMongoTask(BaseOperator):
+class ExecuteS3ToMongoTask(TraceIdMixin, BaseOperator):
     """
     Execute task for S3 to MongoDB workflow.
 
@@ -228,10 +236,12 @@ class ExecuteS3ToMongoTask(BaseOperator):
         """
         # Pull configuration and credentials from XCom
         ti = context["ti"]
+        trace_id = self._get_trace_context(context).trace_id
+        dag_run_id = context["dag_run"].run_id
         config = ti.xcom_pull(task_ids="prepare")
         credentials = ti.xcom_pull(task_ids="prepare", key="credentials")
 
-        self.log.info(f"Executing S3 to MongoDB transfer: {config}")
+        self.log.info(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Executing S3 to MongoDB transfer: {config}")
 
         s3_bucket = config["s3_bucket"]
         s3_prefix = config.get("s3_prefix", "")
@@ -345,13 +355,13 @@ class ExecuteS3ToMongoTask(BaseOperator):
 
                 except json.JSONDecodeError as e:
                     error_msg = f"JSON parse error in {key}: {str(e)}"
-                    self.log.error(error_msg)
+                    self.log.error(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] {error_msg}")
                     stats["errors"] += 1
                     stats["error_messages"].append(error_msg)
 
                 except Exception as e:
                     error_msg = f"Error processing {key}: {str(e)}"
-                    self.log.error(error_msg)
+                    self.log.error(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] {error_msg}", exc_info=True)
                     stats["errors"] += 1
                     stats["error_messages"].append(error_msg)
 
@@ -365,12 +375,12 @@ class ExecuteS3ToMongoTask(BaseOperator):
                     for msg in stats["error_messages"]
                 ], log=self.log)
 
-            self.log.info(f"✓ Transfer complete: {stats}")
+            self.log.info(f"[trace_id={trace_id}] Transfer complete: {stats}")
             return stats
 
         except Exception as e:
             error_msg = f"Unexpected error: {str(e)}"
-            self.log.error(error_msg)
+            self.log.error(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] {error_msg}", exc_info=True)
             stats["errors"] += 1
             stats["error_messages"].append(error_msg)
             # Push all accumulated errors to XCom before re-raising
@@ -402,6 +412,7 @@ class CleanUpS3ToMongoTask(CleanUpTask):
         """
         ti = context["ti"]
         dag_run = context["dag_run"]
+        trace_id = self._get_trace_context(context).trace_id
 
         # Pull XCom data — may be None if upstream tasks failed
         config = ti.xcom_pull(task_ids="prepare")
@@ -415,25 +426,27 @@ class CleanUpS3ToMongoTask(CleanUpTask):
             dag_run_conf = dag_run.conf or {}
             integration_id = dag_run_conf.get("integration_id")
 
-        self.log.info(f"Cleaning up S3 to MongoDB integration: {integration_id}")
+        self.log.info(f"[trace_id={trace_id}] Cleaning up S3 to MongoDB integration: {integration_id}")
         if stats:
-            self.log.info(f"Final statistics: {stats}")
+            self.log.info(f"[trace_id={trace_id}] Final statistics: {stats}")
 
         # 1. Close S3 and MongoDB connections
         # In Airflow, each task runs in its own process. Connections created
         # in validate/execute are already closed when those tasks finish.
         # No shared connections to close here.
-        self.log.info("Step 1: Connections are per-task; no shared connections to close")
+        self.log.info(f"[trace_id={trace_id}] Step 1: Connections are per-task; no shared connections to close")
+
+        dag_run_id = dag_run.run_id
 
         # 2. Clear sensitive credential data from XCom
-        self._clear_sensitive_xcom(context)
+        self._clear_sensitive_xcom(context, trace_id, dag_run_id)
 
         # 3. Update IntegrationRun status in control plane database
-        self._update_integration_run_status(context, integration_id)
+        self._update_integration_run_status(context, integration_id, trace_id, dag_run_id)
 
-        self.log.info("Cleanup complete")
+        self.log.info(f"[trace_id={trace_id}] Cleanup complete")
 
-    def _clear_sensitive_xcom(self, context: Dict[str, Any]) -> None:
+    def _clear_sensitive_xcom(self, context: Dict[str, Any], trace_id: str, dag_run_id: str) -> None:
         """Delete the 'credentials' XCom key pushed by PrepareTask."""
         try:
             dag_run = context["dag_run"]
@@ -447,23 +460,25 @@ class CleanUpS3ToMongoTask(CleanUpTask):
                 XCom.key == "credentials",
             ).delete()
             session.commit()
-            self.log.info("Step 2: Cleared sensitive 'credentials' XCom data")
+            self.log.info(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Step 2: Cleared sensitive 'credentials' XCom data")
         except Exception as e:
-            self.log.warning(f"Step 2: Could not clear XCom credentials: {e}")
+            self.log.warning(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Step 2: Could not clear XCom credentials: {e}")
 
     def _update_integration_run_status(
         self,
         context: Dict[str, Any],
         integration_id: Any,
+        trace_id: str,
+        dag_run_id: str,
     ) -> None:
         """Update IntegrationRun in control plane DB with final status and errors."""
         if integration_id is None:
-            self.log.warning("Step 3: No integration_id available; skipping DB status update")
+            self.log.warning(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Step 3: No integration_id available; skipping DB status update")
             return
 
         db_url = os.environ.get("CONTROL_PLANE_DB_URL")
         if not db_url:
-            self.log.warning("Step 3: CONTROL_PLANE_DB_URL not set; skipping DB status update")
+            self.log.warning(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Step 3: CONTROL_PLANE_DB_URL not set; skipping DB status update")
             return
 
         try:
@@ -533,7 +548,7 @@ class CleanUpS3ToMongoTask(CleanUpTask):
             engine.dispose()
 
         except Exception as e:
-            self.log.error(f"Step 3: Failed to update IntegrationRun status: {e}")
+            self.log.error(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Step 3: Failed to update IntegrationRun status: {e}")
 
     def _collect_upstream_state_errors(
         self,
@@ -568,7 +583,9 @@ class CleanUpS3ToMongoTask(CleanUpTask):
                                 ),
                             })
         except Exception as e:
-            self.log.warning(f"Could not check upstream task states: {e}")
+            trace_id = self._get_trace_context(context).trace_id
+            dag_run_id = context["dag_run"].run_id
+            self.log.warning(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Could not check upstream task states: {e}")
             errors.append({
                 "task_id": "cleanup",
                 "error_code": "STATE_CHECK_ERROR",

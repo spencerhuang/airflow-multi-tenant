@@ -201,6 +201,21 @@ class KafkaConsumerService:
         # Reset retry counter
         self.retry_tracker.reset_retry(message_key)
 
+    @staticmethod
+    def _extract_trace_context(record):
+        """Extract TraceContext from Kafka message headers (W3C traceparent format).
+
+        Debezium's tracing interceptor adds a 'traceparent' header like:
+        '00-<32-char-trace-id>-<16-char-span-id>-<2-char-flags>'
+
+        Falls back to generating a new TraceContext if header is missing.
+
+        Returns:
+            TraceContext instance
+        """
+        from shared_utils import TraceContext
+        return TraceContext.from_kafka_headers(record.headers)
+
     def start(self) -> None:
         """Start the Kafka consumer in a background thread."""
         if self.running:
@@ -292,6 +307,8 @@ class KafkaConsumerService:
 
                                 # Generate message key for retry tracking
                                 message = record.value
+                                trace_ctx = self._extract_trace_context(record)
+                                trace_id = trace_ctx.trace_id
                                 # Try to get integration_id from top level (Debezium) or from data field (legacy)
                                 integration_id = message.get("integration_id")
                                 if not integration_id and isinstance(message.get("data"), dict):
@@ -301,7 +318,8 @@ class KafkaConsumerService:
                                 # Check if message should go to DLQ
                                 if self.enable_dlq and self.retry_tracker.should_send_to_dlq(message_key):
                                     logger.warning(
-                                        f"Message exceeded max retries, sending to DLQ: {message_key}"
+                                        f"Message exceeded max retries, sending to DLQ: {message_key}",
+                                        extra={"trace_id": trace_id},
                                     )
                                     self._send_to_dlq(
                                         message,
@@ -314,7 +332,7 @@ class KafkaConsumerService:
                                     continue
 
                                 # Process message
-                                self._process_message(message)
+                                self._process_message(message, trace_id=trace_id, traceparent=trace_ctx.traceparent)
 
                                 # Track success
                                 self.messages_processed += 1
@@ -333,6 +351,8 @@ class KafkaConsumerService:
 
                                 # Handle processing error
                                 message = record.value if record.value else {}
+                                # trace_id may not be set if extraction itself failed
+                                _trace_id = locals().get("trace_id", "")
                                 # Try to get integration_id from top level (Debezium) or from data field (legacy)
                                 integration_id = message.get("integration_id")
                                 if not integration_id and isinstance(message.get("data"), dict):
@@ -346,7 +366,7 @@ class KafkaConsumerService:
                                     logger.error(
                                         f"Error processing message (attempt {retry_count}/{self.max_retries}): {e}",
                                         exc_info=True,
-                                        extra={"kafka_message": message, "message_key": message_key},
+                                        extra={"kafka_message": message, "message_key": message_key, "trace_id": _trace_id},
                                     )
 
                                     # Check if we should send to DLQ
@@ -360,7 +380,7 @@ class KafkaConsumerService:
                                     logger.error(
                                         f"Error processing message: {e}",
                                         exc_info=True,
-                                        extra={"kafka_message": message},
+                                        extra={"kafka_message": message, "trace_id": _trace_id},
                                     )
 
                 except Exception as e:
@@ -381,7 +401,7 @@ class KafkaConsumerService:
                 except Exception as e:
                     logger.error(f"Error closing consumer: {e}")
 
-    def _process_message(self, message: dict) -> None:
+    def _process_message(self, message: dict, trace_id: str = "", traceparent: str = "") -> None:
         """
         Process a CDC event message.
 
@@ -391,21 +411,8 @@ class KafkaConsumerService:
 
         Args:
             message: CDC event message
-                Debezium format:
-                {
-                    "integration_id": 123,
-                    "workspace_id": "ws-001",
-                    "__op": "c",  # c=create, u=update, d=delete
-                    "__source_ts_ms": 1234567890,
-                    ...all database columns...
-                }
-                Legacy format:
-                {
-                    "event_type": "integration.created",
-                    "event_id": "uuid",
-                    "timestamp": "2026-02-04T12:00:00Z",
-                    "data": {...}
-                }
+            trace_id: 32-char hex trace ID for log correlation
+            traceparent: Full W3C traceparent header for propagation to Airflow
         """
         # Check if this is a real Debezium CDC event
         if "__op" in message:
@@ -415,7 +422,7 @@ class KafkaConsumerService:
 
             logger.info(
                 f"Processing Debezium CDC event: operation={operation}, integration_id={integration_id}",
-                extra={"operation": operation, "integration_id": integration_id},
+                extra={"operation": operation, "integration_id": integration_id, "trace_id": trace_id},
             )
 
             # Map Debezium operations to event types
@@ -426,7 +433,7 @@ class KafkaConsumerService:
             elif operation == "d":  # Delete
                 event_type = "integration.deleted"
             else:
-                logger.warning(f"Unknown Debezium operation: {operation}")
+                logger.warning(f"Unknown Debezium operation: {operation}", extra={"trace_id": trace_id})
                 return
 
             # Use the entire message as data (includes all database columns)
@@ -447,10 +454,11 @@ class KafkaConsumerService:
                     "event_id": event_id,
                     "event_type": event_type,
                     "timestamp": timestamp,
+                    "trace_id": trace_id,
                 },
             )
         else:
-            logger.warning(f"Unknown message format: {list(message.keys())}")
+            logger.warning(f"Unknown message format: {list(message.keys())}", extra={"trace_id": trace_id})
             return
 
         # Call event handler if provided
@@ -461,75 +469,78 @@ class KafkaConsumerService:
                 logger.error(
                     f"Error in event handler: {e}",
                     exc_info=True,
-                    extra={"event_type": event_type, "data": data},
+                    extra={"event_type": event_type, "data": data, "trace_id": trace_id},
                 )
                 # Re-raise only if DLQ is enabled (for retry tracking)
                 if self.enable_dlq:
                     raise
         else:
             # Default processing based on event type
-            self._default_event_processing(event_type, data)
+            self._default_event_processing(event_type, data, trace_id=trace_id, traceparent=traceparent)
 
-    def _default_event_processing(self, event_type: str, data: dict) -> None:
+    def _default_event_processing(self, event_type: str, data: dict, trace_id: str = "", traceparent: str = "") -> None:
         """
         Default event processing logic.
 
         Args:
             event_type: Type of CDC event
             data: Event data
+            trace_id: 32-char hex trace ID for log correlation
+            traceparent: Full W3C traceparent header for propagation to Airflow
         """
         if event_type == "integration.created":
             integration_id = data.get('integration_id')
             logger.info(
                 f"Integration created: {integration_id}",
-                extra={"data": data},
+                extra={"data": data, "trace_id": trace_id},
             )
 
             # Trigger initial data sync if integration data is provided
             if self._should_trigger_integration(data):
                 try:
-                    self._trigger_integration_workflow(data)
+                    self._trigger_integration_workflow(data, trace_id=trace_id, traceparent=traceparent)
                 except Exception as e:
                     logger.error(
                         f"Failed to trigger workflow for integration {integration_id}: {e}",
                         exc_info=True,
+                        extra={"trace_id": trace_id},
                     )
 
         elif event_type == "integration.updated":
             logger.info(
                 f"Integration updated: {data.get('integration_id')}",
-                extra={"data": data},
+                extra={"data": data, "trace_id": trace_id},
             )
             # Configuration updates don't automatically trigger workflows
 
         elif event_type == "integration.deleted":
             logger.info(
                 f"Integration deleted: {data.get('integration_id')}",
-                extra={"data": data},
+                extra={"data": data, "trace_id": trace_id},
             )
             # Cleanup is handled by cascade delete in database
 
         elif event_type == "integration.run.started":
             logger.info(
                 f"Integration run started: {data.get('run_id')}",
-                extra={"data": data},
+                extra={"data": data, "trace_id": trace_id},
             )
 
         elif event_type == "integration.run.completed":
             logger.info(
                 f"Integration run completed: {data.get('run_id')}",
-                extra={"data": data},
+                extra={"data": data, "trace_id": trace_id},
             )
 
         elif event_type == "integration.run.failed":
             logger.error(
                 f"Integration run failed: {data.get('run_id')}",
-                extra={"data": data},
+                extra={"data": data, "trace_id": trace_id},
             )
             # TODO: Send alerts, retry logic, etc.
 
         else:
-            logger.warning(f"Unknown event type: {event_type}", extra={"data": data})
+            logger.warning(f"Unknown event type: {event_type}", extra={"data": data, "trace_id": trace_id})
 
     def _should_trigger_integration(self, data: dict) -> bool:
         """
@@ -552,7 +563,7 @@ class KafkaConsumerService:
             and data.get("destination_config")
         )
 
-    def _trigger_integration_workflow(self, data: dict) -> None:
+    def _trigger_integration_workflow(self, data: dict, trace_id: str = "", traceparent: str = "") -> None:
         """
         Trigger Airflow DAG for integration.
 
@@ -562,13 +573,18 @@ class KafkaConsumerService:
 
         Args:
             data: Integration event data with workflow configuration
+            trace_id: 32-char hex trace ID for log correlation
+            traceparent: Full W3C traceparent header for propagation to Airflow
         """
         import json as json_module
         from sqlalchemy import create_engine, select, func
         from shared_models.tables import integrations as integrations_t, integration_runs as integration_runs_t, auths as auths_t
 
         integration_id = data.get("integration_id")
-        logger.info(f"Triggering workflow for integration {integration_id}")
+        logger.info(
+            f"Triggering workflow for integration {integration_id}",
+            extra={"trace_id": trace_id},
+        )
 
         try:
             engine = create_engine(settings.DATABASE_URL)
@@ -601,27 +617,36 @@ class KafkaConsumerService:
                 ).fetchone()
 
             if not row:
-                logger.error(f"Integration {integration_id} not found in database")
+                logger.error(
+                    f"Integration {integration_id} not found in database",
+                    extra={"trace_id": trace_id},
+                )
                 return
 
             # For Debezium events, extract execution_config from json_data
             if data.get("is_debezium_event"):
                 logger.info(
-                    f"Processing Debezium CDC event - querying database for integration {integration_id}"
+                    f"Processing Debezium CDC event - querying database for integration {integration_id}",
+                    extra={"trace_id": trace_id},
                 )
                 json_data = row.json_data
                 if json_data:
                     try:
                         execution_config = json_module.loads(json_data)
                         logger.info(
-                            f"Extracted execution config from database: {list(execution_config.keys())}"
+                            f"Extracted execution config from database: {list(execution_config.keys())}",
+                            extra={"trace_id": trace_id},
                         )
                     except json_module.JSONDecodeError as e:
                         logger.error(
-                            f"Failed to parse json_data for integration {integration_id}: {e}"
+                            f"Failed to parse json_data for integration {integration_id}: {e}",
+                            extra={"trace_id": trace_id},
                         )
                 else:
-                    logger.warning(f"Integration {integration_id} has no json_data")
+                    logger.warning(
+                        f"Integration {integration_id} has no json_data",
+                        extra={"trace_id": trace_id},
+                    )
 
             # --- Step 3: Determine DAG ID ---
             integration_type = row.integration_type
@@ -652,6 +677,7 @@ class KafkaConsumerService:
                 "auth_id": row.auth_id,
                 "source_access_pt_id": row.source_access_pt_id,
                 "dest_access_pt_id": row.dest_access_pt_id,
+                "traceparent": traceparent,
             }
             # Merge json_data config (non-sensitive workflow config)
             if row.json_data:
@@ -672,15 +698,18 @@ class KafkaConsumerService:
                         conf.update(json_module.loads(auth_row.json_data))
                     except json_module.JSONDecodeError:
                         logger.warning(
-                            f"Failed to parse auth json_data for workspace {workspace_id}"
+                            f"Failed to parse auth json_data for workspace {workspace_id}",
+                            extra={"trace_id": trace_id},
                         )
             logger.info(
-                f"Resolved {len(auth_rows)} auth record(s) for workspace {workspace_id}"
+                f"Resolved {len(auth_rows)} auth record(s) for workspace {workspace_id}",
+                extra={"trace_id": trace_id},
             )
 
-            # Override with execution_config
+            # Override with execution_config (but preserve traceparent)
             if execution_config:
                 conf.update(execution_config)
+            conf["traceparent"] = traceparent
 
             # --- Step 5: Trigger Airflow DAG via REST API ---
             import requests
@@ -725,14 +754,14 @@ class KafkaConsumerService:
 
             logger.info(
                 f"Workflow triggered successfully for integration {integration_id}",
-                extra={"dag_run_id": dag_run_id, "dag_id": dag_id},
+                extra={"dag_run_id": dag_run_id, "dag_id": dag_id, "trace_id": trace_id},
             )
 
         except Exception as e:
             logger.error(
                 f"Error triggering workflow: {e}",
                 exc_info=True,
-                extra={"integration_id": integration_id},
+                extra={"integration_id": integration_id, "trace_id": trace_id},
             )
             raise
 

@@ -40,6 +40,8 @@ class JSONFormatter(logging.Formatter):
             log_data["error_detail"] = record.error_detail
         if hasattr(record, "request_body"):
             log_data["request_body"] = record.request_body
+        if hasattr(record, "trace_id"):
+            log_data["trace_id"] = record.trace_id
 
         # Add stack trace for errors
         if record.exc_info:

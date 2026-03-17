@@ -137,6 +137,24 @@ docker-compose up -d
 
 ![Test in local e2e](docs/Screenshot2026-02-04at10.50.41AM.png)
 
+## Distributed Tracing
+
+W3C traceparent headers flow end-to-end across the entire pipeline for log correlation:
+
+```
+Debezium CDC ──→ Kafka (traceparent header) ──→ Consumer (trace_id in logs) ──→ Airflow DAG conf ──→ Task logs
+```
+
+A lightweight Java interceptor (`TraceparentInterceptor`) injects a `traceparent` header into every Kafka message at the Kafka Connect producer level — zero OpenTelemetry SDK dependencies. The Kafka consumer parses the header, attaches `trace_id` to all structured log lines, and forwards the full `traceparent` to Airflow via DAG run conf. Airflow tasks extract it via `TraceIdMixin` and prefix every log line with `[trace_id=...]`.
+
+Traceparent headers are visible in Kafka UI and propagated through Airflow XCom:
+
+![Distributed tracing — Kafka UI traceparent header and Airflow XCom](docs/Screenshot%202026-03-17%20at%201.37.45%20PM.png)
+
+**Disclaimer:** Trace IDs live only in Kafka headers, structured logs, and Airflow XCom — they are not persisted to the database (e.g., `integration_runs`). 
+
+See [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) for the full design rationale and file-by-file breakdown.
+
 ## Key Components
 
 [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)

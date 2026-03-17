@@ -23,7 +23,7 @@ from shared_models.tables import (
     auths as auths_table,
     integrations as integrations_table,
 )
-from shared_utils import get_airflow_auth_headers, create_control_plane_engine
+from shared_utils import get_airflow_auth_headers, create_control_plane_engine, TraceContext
 
 
 class DispatchScheduledIntegrationsTask(BaseOperator):
@@ -55,10 +55,13 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
         self.integration_type = integration_type
 
     def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        dag_run_id = context["dag_run"].run_id
+        trace_ctx = TraceContext.new()
+        trace_id = trace_ctx.trace_id
         config = get_control_plane_config()
         db_url = config.control_plane_db_url
         if not db_url:
-            self.log.warning("CONTROL_PLANE_DB_URL not set; nothing to dispatch")
+            self.log.warning(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] CONTROL_PLANE_DB_URL not set; nothing to dispatch")
             return {"dispatched": 0, "errors": 0, "results": []}
 
         engine = create_control_plane_engine(db_url)
@@ -95,7 +98,7 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
                         "error": str(e),
                     })
                     self.log.error(
-                        f"Failed to dispatch integration {row.integration_id}: {e}"
+                        f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Failed to dispatch integration {row.integration_id}: {e}"
                     )
 
             summary = {
@@ -163,6 +166,7 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
             "auth_id": row.auth_id,
             "source_access_pt_id": row.source_access_pt_id,
             "dest_access_pt_id": row.dest_access_pt_id,
+            "traceparent": TraceContext.new().traceparent,
         }
 
         # Merge integration json_data (non-sensitive workflow config)

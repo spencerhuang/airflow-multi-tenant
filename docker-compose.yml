@@ -157,7 +157,9 @@ services:
 
   # Kafka Connect (for Debezium CDC)
   kafka-connect:
-    image: debezium/connect:2.5
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.kafka-connect
     platform: linux/amd64
     container_name: kafka-connect
     depends_on:
@@ -181,6 +183,10 @@ services:
       KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
       ENABLE_DEBEZIUM_SCRIPTING: "true"
+      # Distributed tracing — custom interceptor injects W3C traceparent
+      # headers into every Kafka message produced by Debezium CDC.
+      # Zero OTEL SDK dependencies — just generates trace_id + span_id.
+      CONNECT_PRODUCER_INTERCEPTOR_CLASSES: io.debezium.tracing.TraceparentInterceptor
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8083/connectors" ]
       interval: 15s
