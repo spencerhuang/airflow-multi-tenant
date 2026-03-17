@@ -28,6 +28,19 @@ Why is it relevant?
 
 Regardless you're doing EDA or fine-tuning LLM, you need data to start your ingestion/training pipeline. This project will bootstrap your data needs not just for the near-term, but robust enough to expand in the long run.
 
+How does it compare?
+
+No existing solution provides a turnkey, open-source, self-hosted platform that combines Airflow-compatible orchestration, Kafka-native event-driven architecture, and true single-instance multi-tenancy.
+
+| Capability | This Project | Kestra | Dagster | Astronomer Astro | AWS MWAA |
+|---|---|---|---|---|---|
+| Single-instance multi-tenancy | ✅ (SMB) | Enterprise only | ✅ | ❌ (separate deploys) | ❌ |
+| Kafka-native event-driven | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Airflow-compatible | ✅ | ❌ (YAML) | ❌ | ✅ | ✅ |
+| Open-source & self-hosted | ✅ | ✅ | ✅ | ❌ | ❌ |
+
+Managed Airflow providers (Astronomer, MWAA, Cloud Composer) solve multi-tenancy by spinning up separate environments per tenant — expensive and operationally heavy. Kestra is the closest architecturally but uses YAML workflows instead of the Airflow ecosystem. Dagster has good multi-tenancy but no native Kafka event backbone.
+
 ## Architecture Overview
 
 ```
