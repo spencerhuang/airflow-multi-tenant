@@ -1,25 +1,22 @@
-"""Configuration settings for the control plane service."""
+"""Configuration settings for the control plane service.
+
+Uses the unified secret provider for sensitive fields: secrets are resolved
+from filesystem first (K8s mounted secrets), then environment variables.
+"""
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import model_validator
 from typing import Optional
+
+from shared_utils.secret_provider import read_secret
 
 
 class Settings(BaseSettings):
     """
     Application settings loaded from environment variables.
 
-    Attributes:
-        PROJECT_NAME: Name of the project
-        VERSION: API version
-        API_V1_STR: API v1 prefix
-        DATABASE_URL: Database connection URL
-        AIRFLOW_API_URL: Airflow REST API base URL
-        AIRFLOW_USERNAME: Airflow API username
-        AIRFLOW_PASSWORD: Airflow API password
-        SECRET_KEY: Secret key for JWT encoding
-        ALGORITHM: JWT algorithm
-        ACCESS_TOKEN_EXPIRE_MINUTES: JWT token expiration time
-        AUTH_ENABLED: Enable/disable authentication
+    Sensitive fields (DATABASE_URL, SECRET_KEY, AIRFLOW_PASSWORD) are resolved
+    via the unified secret provider: file at /run/secrets/ -> env var -> default.
     """
 
     PROJECT_NAME: str = "Airflow Multi-Tenant Control Plane"
@@ -39,6 +36,19 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     AUTH_ENABLED: bool = False  # Disabled for now as per requirements
+
+    @model_validator(mode="after")
+    def _resolve_secrets(self) -> "Settings":
+        """Override sensitive fields from the unified secret provider."""
+        secret_key = read_secret("SECRET_KEY")
+        if secret_key:
+            object.__setattr__(self, "SECRET_KEY", secret_key)
+
+        airflow_pw = read_secret("AIRFLOW_PASSWORD")
+        if airflow_pw:
+            object.__setattr__(self, "AIRFLOW_PASSWORD", airflow_pw)
+
+        return self
 
     # Backfill Strategy (Section 9 of spec)
     MAX_BACKFILL_DAYS: int = 7

@@ -1,10 +1,21 @@
-"""Configuration settings for the Kafka CDC consumer service."""
+"""Configuration settings for the Kafka CDC consumer service.
+
+Uses the unified secret provider for sensitive fields.
+"""
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import model_validator
+from typing import Optional
+
+from shared_utils.secret_provider import read_secret
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables."""
+    """Application settings loaded from environment variables.
+
+    Sensitive fields are resolved via the unified secret provider:
+    file at /run/secrets/ -> env var -> default.
+    """
 
     PROJECT_NAME: str = "Kafka CDC Consumer"
     VERSION: str = "1.0.0"
@@ -19,6 +30,7 @@ class Settings(BaseSettings):
 
     # Kafka
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
+    KAFKA_PASSWORD: Optional[str] = None
     KAFKA_TOPIC_CDC: str = "cdc.integration.events"
     KAFKA_TOPIC_DLQ: str = "cdc.integration.events.dlq"
     KAFKA_DLQ_ENABLED: bool = True
@@ -29,6 +41,19 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
+
+    @model_validator(mode="after")
+    def _resolve_secrets(self) -> "Settings":
+        """Override sensitive fields from the unified secret provider."""
+        airflow_pw = read_secret("AIRFLOW_PASSWORD")
+        if airflow_pw:
+            object.__setattr__(self, "AIRFLOW_PASSWORD", airflow_pw)
+
+        kafka_pw = read_secret("KAFKA_PASSWORD")
+        if kafka_pw:
+            object.__setattr__(self, "KAFKA_PASSWORD", kafka_pw)
+
+        return self
 
     model_config = SettingsConfigDict(
         env_file=".env",

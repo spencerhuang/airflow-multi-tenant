@@ -205,6 +205,8 @@ class TestCDCEvents:
         # Receive event
         messages = []
         for message in kafka_consumer:
+            if message.value is None:
+                continue
             messages.append(message.value)
             if message.value.get("event_type") == "integration_run.started":
                 break
@@ -252,6 +254,8 @@ class TestCDCEvents:
         # Receive events
         received_events = []
         for message in kafka_consumer:
+            if message.value is None:
+                continue
             if message.value.get("event_type", "").startswith("test.event"):
                 received_events.append(message.value)
             if len(received_events) >= 3:

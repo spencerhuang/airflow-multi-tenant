@@ -100,8 +100,9 @@ def _make_prepare_context(conf, run_id="test_run_123"):
 class TestPrepareS3ToMongoTask:
     """Test PrepareS3ToMongoTask operator."""
 
-    def test_execute_success(self):
-        """Test successful execution pushes config and credentials."""
+    @patch("operators.s3_to_mongo_operators.store_credentials")
+    def test_execute_success(self, mock_store_creds):
+        """Test successful execution stores credentials in Redis, not XCom."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
         context = _make_prepare_context({
@@ -127,11 +128,10 @@ class TestPrepareS3ToMongoTask:
         assert "s3_secret_key" not in result
         assert "mongo_uri" not in result
 
-        # Credentials should be pushed as separate XCom key
-        mock_ti = context["ti"]
-        mock_ti.xcom_push.assert_any_call(
-            key="credentials",
-            value={
+        # Credentials should be stored in Redis (not XCom)
+        mock_store_creds.assert_called_once_with(
+            "test_run_123",
+            {
                 "s3_endpoint_url": "http://custom-s3:9000",
                 "s3_access_key": "mykey",
                 "s3_secret_key": "mysecret",
@@ -140,7 +140,13 @@ class TestPrepareS3ToMongoTask:
             },
         )
 
-    def test_execute_credentials_use_defaults(self):
+        # Verify no credentials were pushed to XCom
+        mock_ti = context["ti"]
+        for c in mock_ti.xcom_push.call_args_list:
+            assert c[1].get("key") != "credentials"
+
+    @patch("operators.s3_to_mongo_operators.store_credentials")
+    def test_execute_credentials_use_defaults(self, mock_store_creds):
         """Test that missing credentials use defaults."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
@@ -151,8 +157,8 @@ class TestPrepareS3ToMongoTask:
 
         operator.execute(context)
 
-        # Verify defaults are used in credentials
-        creds = context["ti"].xcom_push.call_args[1]["value"]
+        # Verify defaults are used in credentials stored to Redis
+        creds = mock_store_creds.call_args[0][1]
         assert creds["s3_endpoint_url"] == "http://minio:9000"
         assert creds["s3_access_key"] == "minioadmin"
         assert creds["s3_secret_key"] == "minioadmin"
@@ -197,7 +203,8 @@ class TestPrepareS3ToMongoTask:
             }],
         )
 
-    def test_execute_with_default_prefix(self):
+    @patch("operators.s3_to_mongo_operators.store_credentials")
+    def test_execute_with_default_prefix(self, mock_store_creds):
         """Test execution with default s3_prefix."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
@@ -209,7 +216,8 @@ class TestPrepareS3ToMongoTask:
         result = operator.execute(context)
         assert result["s3_prefix"] == ""
 
-    def test_execute_with_empty_conf(self):
+    @patch("operators.s3_to_mongo_operators.store_credentials")
+    def test_execute_with_empty_conf(self, mock_store_creds):
         """Test execution with None conf."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
@@ -218,8 +226,9 @@ class TestPrepareS3ToMongoTask:
         with pytest.raises(ValueError):
             operator.execute(context)
 
+    @patch("operators.s3_to_mongo_operators.store_credentials")
     @patch("operators.s3_to_mongo_operators.create_integration_run")
-    def test_execute_creates_integration_run(self, mock_create_run):
+    def test_execute_creates_integration_run(self, mock_create_run, mock_store_creds):
         """Test that Prepare calls create_integration_run with correct args."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
@@ -238,7 +247,8 @@ class TestPrepareS3ToMongoTask:
             42, "ws1_s3_to_mongo_ondemand_scheduled_20260310_0200", log=operator.log,
         )
 
-    def test_execute_skips_integration_run_without_db_url(self):
+    @patch("operators.s3_to_mongo_operators.store_credentials")
+    def test_execute_skips_integration_run_without_db_url(self, mock_store_creds):
         """Test that Prepare skips IntegrationRun creation when no DB URL."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
@@ -255,7 +265,8 @@ class TestPrepareS3ToMongoTask:
         # Should succeed without DB interaction
         assert result["integration_id"] == 1
 
-    def test_execute_skips_integration_run_without_integration_id(self):
+    @patch("operators.s3_to_mongo_operators.store_credentials")
+    def test_execute_skips_integration_run_without_integration_id(self, mock_store_creds):
         """Test that Prepare skips IntegrationRun creation when no integration_id."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
@@ -267,8 +278,9 @@ class TestPrepareS3ToMongoTask:
         result = operator.execute(context)
         assert result["integration_id"] is None
 
+    @patch("operators.s3_to_mongo_operators.store_credentials")
     @patch("operators.s3_to_mongo_operators.create_integration_run")
-    def test_execute_creates_integration_run_even_on_failure(self, mock_create_run):
+    def test_execute_creates_integration_run_even_on_failure(self, mock_create_run, mock_store_creds):
         """Test that IntegrationRun is created even when validation fails."""
         operator = PrepareS3ToMongoTask(task_id="prepare")
 
@@ -288,14 +300,16 @@ class TestPrepareS3ToMongoTask:
 class TestValidateS3ToMongoTask:
     """Test ValidateS3ToMongoTask operator."""
 
+    @patch("operators.s3_to_mongo_operators.fetch_credentials")
     @patch("operators.s3_to_mongo_operators.MongoClient")
     @patch("operators.s3_to_mongo_operators.MongoAuth")
     @patch("operators.s3_to_mongo_operators.S3Client")
     @patch("operators.s3_to_mongo_operators.S3Auth")
-    def test_execute_pulls_credentials_from_xcom(
-        self, mock_s3_auth_cls, mock_s3_client_cls, mock_mongo_auth_cls, mock_mongo_client_cls
+    def test_execute_fetches_credentials_from_redis(
+        self, mock_s3_auth_cls, mock_s3_client_cls, mock_mongo_auth_cls, mock_mongo_client_cls,
+        mock_fetch_creds
     ):
-        """Test that validate reads credentials from XCom, not dag_run.conf."""
+        """Test that validate reads credentials from Redis, not XCom."""
         operator = ValidateS3ToMongoTask(task_id="validate")
 
         mock_s3_client_cls.return_value.list_objects.return_value = [{"Key": "test"}]
@@ -314,16 +328,10 @@ class TestValidateS3ToMongoTask:
             "mongo_database": "mydb",
         }
 
+        mock_fetch_creds.return_value = credentials
+
         mock_ti = Mock()
-
-        def xcom_pull_side_effect(task_ids=None, key=None):
-            if task_ids == "prepare" and key == "credentials":
-                return credentials
-            if task_ids == "prepare":
-                return config
-            return None
-
-        mock_ti.xcom_pull.side_effect = xcom_pull_side_effect
+        mock_ti.xcom_pull.return_value = config
         mock_dag_run = Mock()
         mock_dag_run.run_id = "test_run_123"
         mock_dag_run.conf = {}
@@ -332,10 +340,10 @@ class TestValidateS3ToMongoTask:
         result = operator.execute(context)
         assert result is True
 
-        # Verify credentials were pulled from XCom
-        mock_ti.xcom_pull.assert_any_call(task_ids="prepare", key="credentials")
+        # Verify credentials were fetched from Redis
+        mock_fetch_creds.assert_called_once_with("test_run_123")
 
-        # Verify S3Auth was created with XCom credentials
+        # Verify S3Auth was created with Redis credentials
         mock_s3_auth_cls.assert_called_once_with(
             aws_access_key_id="mykey",
             aws_secret_access_key="mysecret",
@@ -343,26 +351,29 @@ class TestValidateS3ToMongoTask:
             endpoint_url="http://minio:9000",
         )
 
+    @patch("operators.s3_to_mongo_operators.fetch_credentials")
     @patch("operators.s3_to_mongo_operators.MongoClient")
     @patch("operators.s3_to_mongo_operators.MongoAuth")
     @patch("operators.s3_to_mongo_operators.S3Client")
     @patch("operators.s3_to_mongo_operators.S3Auth")
     def test_execute_validation_failure(
-        self, mock_s3_auth_cls, mock_s3_client_cls, mock_mongo_auth_cls, mock_mongo_client_cls
+        self, mock_s3_auth_cls, mock_s3_client_cls, mock_mongo_auth_cls, mock_mongo_client_cls,
+        mock_fetch_creds
     ):
         """Test that validation failure raises exception and pushes error to XCom."""
         operator = ValidateS3ToMongoTask(task_id="validate")
 
         mock_s3_client_cls.return_value.list_objects.side_effect = Exception("Access denied")
 
+        mock_fetch_creds.return_value = {
+            "s3_endpoint_url": "http://minio:9000",
+            "s3_access_key": "bad", "s3_secret_key": "bad",
+            "mongo_uri": "mongodb://host:27017/", "mongo_database": "db",
+        }
+
         mock_ti = Mock()
         mock_ti.xcom_pull.side_effect = lambda task_ids=None, key=None: {
             ("prepare", None): {"s3_bucket": "bad-bucket", "s3_prefix": ""},
-            ("prepare", "credentials"): {
-                "s3_endpoint_url": "http://minio:9000",
-                "s3_access_key": "bad", "s3_secret_key": "bad",
-                "mongo_uri": "mongodb://host:27017/", "mongo_database": "db",
-            },
             ("prepare", "traceparent"): None,
         }.get((task_ids, key))
         mock_dag_run = Mock()
@@ -387,6 +398,13 @@ class TestValidateS3ToMongoTask:
 class TestExecuteS3ToMongoTask:
     """Test ExecuteS3ToMongoTask operator."""
 
+    _mock_credentials = {
+        "s3_endpoint_url": "http://minio:9000",
+        "s3_access_key": "mykey", "s3_secret_key": "mysecret",
+        "mongo_uri": "mongodb://user:pass@host:27017/",
+        "mongo_database": "mydb",
+    }
+
     def _make_execute_context(self):
         """Build a mock context for Execute task tests."""
         mock_ti = Mock()
@@ -396,12 +414,6 @@ class TestExecuteS3ToMongoTask:
                 "s3_prefix": "data/",
                 "mongo_collection": "test_collection",
             },
-            ("prepare", "credentials"): {
-                "s3_endpoint_url": "http://minio:9000",
-                "s3_access_key": "mykey", "s3_secret_key": "mysecret",
-                "mongo_uri": "mongodb://user:pass@host:27017/",
-                "mongo_database": "mydb",
-            },
             ("prepare", "traceparent"): None,
         }.get((task_ids, key))
         mock_dag_run = Mock()
@@ -409,6 +421,7 @@ class TestExecuteS3ToMongoTask:
         mock_dag_run.conf = {}
         return {"ti": mock_ti, "dag_run": mock_dag_run}
 
+    @patch("operators.s3_to_mongo_operators.fetch_credentials")
     @patch("operators.s3_to_mongo_operators.MongoClient")
     @patch("operators.s3_to_mongo_operators.MongoAuth")
     @patch("operators.s3_to_mongo_operators.S3Reader")
@@ -416,11 +429,12 @@ class TestExecuteS3ToMongoTask:
     @patch("operators.s3_to_mongo_operators.S3Auth")
     def test_execute_no_objects(
         self, mock_s3_auth_cls, mock_s3_client_cls, mock_s3_reader_cls,
-        mock_mongo_auth_cls, mock_mongo_client_cls
+        mock_mongo_auth_cls, mock_mongo_client_cls, mock_fetch_creds
     ):
         """Test execute with no S3 objects returns empty stats."""
         operator = ExecuteS3ToMongoTask(task_id="execute")
 
+        mock_fetch_creds.return_value = self._mock_credentials
         mock_s3_client_cls.return_value.list_objects.return_value = []
 
         context = self._make_execute_context()
@@ -431,8 +445,9 @@ class TestExecuteS3ToMongoTask:
         assert result["records_read"] == 0
         assert result["records_written"] == 0
         assert result["errors"] == 0
-        context["ti"].xcom_pull.assert_any_call(task_ids="prepare", key="credentials")
+        mock_fetch_creds.assert_called_once_with("test_run_123")
 
+    @patch("operators.s3_to_mongo_operators.fetch_credentials")
     @patch("operators.s3_to_mongo_operators.MongoClient")
     @patch("operators.s3_to_mongo_operators.MongoAuth")
     @patch("operators.s3_to_mongo_operators.S3Reader")
@@ -440,10 +455,11 @@ class TestExecuteS3ToMongoTask:
     @patch("operators.s3_to_mongo_operators.S3Auth")
     def test_execute_processes_json_files(
         self, mock_s3_auth_cls, mock_s3_client_cls, mock_s3_reader_cls,
-        mock_mongo_auth_cls, mock_mongo_client_cls
+        mock_mongo_auth_cls, mock_mongo_client_cls, mock_fetch_creds
     ):
         """Test execute processes JSON files and writes to MongoDB."""
         operator = ExecuteS3ToMongoTask(task_id="execute")
+        mock_fetch_creds.return_value = self._mock_credentials
 
         mock_s3_client_cls.return_value.list_objects.return_value = [
             {"Key": "data/record_1.json"},
@@ -467,6 +483,7 @@ class TestExecuteS3ToMongoTask:
         for c in context["ti"].xcom_push.call_args_list:
             assert "task_errors" not in str(c)
 
+    @patch("operators.s3_to_mongo_operators.fetch_credentials")
     @patch("operators.s3_to_mongo_operators.MongoClient")
     @patch("operators.s3_to_mongo_operators.MongoAuth")
     @patch("operators.s3_to_mongo_operators.S3Reader")
@@ -474,10 +491,11 @@ class TestExecuteS3ToMongoTask:
     @patch("operators.s3_to_mongo_operators.S3Auth")
     def test_execute_pushes_data_errors_to_xcom(
         self, mock_s3_auth_cls, mock_s3_client_cls, mock_s3_reader_cls,
-        mock_mongo_auth_cls, mock_mongo_client_cls
+        mock_mongo_auth_cls, mock_mongo_client_cls, mock_fetch_creds
     ):
         """Test that data-level errors are pushed to XCom for CleanUp."""
         operator = ExecuteS3ToMongoTask(task_id="execute")
+        mock_fetch_creds.return_value = self._mock_credentials
 
         mock_s3_client_cls.return_value.list_objects.return_value = [
             {"Key": "data/good.json"},
@@ -531,9 +549,7 @@ class TestCleanUpS3ToMongoTask:
             if key and key.startswith("task_errors_"):
                 task_id = key.replace("task_errors_", "")
                 return xcom_errors.get(task_id)
-            # Standard XCom pulls
-            if task_ids == "prepare" and key == "credentials":
-                return {"s3_access_key": "secret"}
+            # Standard XCom pulls (no credentials — those are in Redis now)
             if task_ids == "prepare" and key is None:
                 return config
             if task_ids == "execute" and key is None:
@@ -564,8 +580,9 @@ class TestCleanUpS3ToMongoTask:
 
         return {"ti": mock_ti, "dag_run": mock_dag_run}
 
+    @patch("operators.s3_to_mongo_operators.delete_credentials")
     @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
-    def test_execute_success_updates_db(self, mock_create_engine):
+    def test_execute_success_updates_db(self, mock_create_engine, mock_delete_creds):
         """Test cleanup updates IntegrationRun on success (no errors in XCom)."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
@@ -593,8 +610,9 @@ class TestCleanUpS3ToMongoTask:
         # Verify commit was called
         mock_conn.commit.assert_called_once()
 
+    @patch("operators.s3_to_mongo_operators.delete_credentials")
     @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
-    def test_execute_records_xcom_errors(self, mock_create_engine):
+    def test_execute_records_xcom_errors(self, mock_create_engine, mock_delete_creds):
         """Test cleanup persists detailed errors from XCom to integration_run_errors."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
@@ -629,8 +647,9 @@ class TestCleanUpS3ToMongoTask:
         # 1 INSERT (execute state fallback, since no XCom error for execute) = 4 calls
         assert mock_conn.execute.call_count == 4
 
+    @patch("operators.s3_to_mongo_operators.delete_credentials")
     @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
-    def test_execute_records_data_errors_from_xcom(self, mock_create_engine):
+    def test_execute_records_data_errors_from_xcom(self, mock_create_engine, mock_delete_creds):
         """Test cleanup records data-level errors pushed by Execute task."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
@@ -661,8 +680,9 @@ class TestCleanUpS3ToMongoTask:
         # SELECT + UPDATE + 2 INSERTs (two data errors from XCom) = 4 calls
         assert mock_conn.execute.call_count == 4
 
+    @patch("operators.s3_to_mongo_operators.delete_credentials")
     @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
-    def test_execute_state_fallback_when_no_xcom_errors(self, mock_create_engine):
+    def test_execute_state_fallback_when_no_xcom_errors(self, mock_create_engine, mock_delete_creds):
         """Test that task state is used as fallback when XCom errors are absent."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
@@ -692,8 +712,9 @@ class TestCleanUpS3ToMongoTask:
         # SELECT + UPDATE + 2 INSERTs (validate failed + execute upstream_failed) = 4 calls
         assert mock_conn.execute.call_count == 4
 
+    @patch("operators.s3_to_mongo_operators.delete_credentials")
     @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
-    def test_execute_no_duplicate_errors_from_xcom_and_state(self, mock_create_engine):
+    def test_execute_no_duplicate_errors_from_xcom_and_state(self, mock_create_engine, mock_delete_creds):
         """Test that errors from XCom don't get duplicated by state fallback."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
@@ -729,7 +750,8 @@ class TestCleanUpS3ToMongoTask:
         # 1 INSERT (execute from state fallback) = 4 calls
         assert mock_conn.execute.call_count == 4
 
-    def test_execute_no_integration_id_skips_db(self):
+    @patch("operators.s3_to_mongo_operators.delete_credentials")
+    def test_execute_no_integration_id_skips_db(self, mock_delete_creds):
         """Test cleanup handles missing integration_id gracefully."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
@@ -744,7 +766,8 @@ class TestCleanUpS3ToMongoTask:
             # Should not raise
             operator.execute(context)
 
-    def test_execute_no_db_url_skips_db(self):
+    @patch("operators.s3_to_mongo_operators.delete_credentials")
+    def test_execute_no_db_url_skips_db(self, mock_delete_creds):
         """Test cleanup skips DB update when CONTROL_PLANE_DB_URL not set."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
@@ -758,8 +781,9 @@ class TestCleanUpS3ToMongoTask:
             # Should not raise — just logs warning
             operator.execute(context)
 
+    @patch("operators.s3_to_mongo_operators.delete_credentials")
     @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
-    def test_execute_no_integration_run_record(self, mock_create_engine):
+    def test_execute_no_integration_run_record(self, mock_create_engine, mock_delete_creds):
         """Test cleanup handles missing IntegrationRun record gracefully."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
@@ -785,7 +809,8 @@ class TestCleanUpS3ToMongoTask:
         # Only SELECT was called (no UPDATE/INSERT since no record found)
         assert mock_conn.execute.call_count == 1
 
-    def test_execute_fallback_to_dag_run_conf(self):
+    @patch("operators.s3_to_mongo_operators.delete_credentials")
+    def test_execute_fallback_to_dag_run_conf(self, mock_delete_creds):
         """Test cleanup falls back to dag_run.conf when XCom has no config."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
@@ -800,8 +825,9 @@ class TestCleanUpS3ToMongoTask:
             # Should not raise; integration_id=99 comes from dag_run.conf
             operator.execute(context)
 
-    def test_execute_clears_credentials_xcom(self):
-        """Test cleanup clears sensitive XCom data."""
+    @patch("operators.s3_to_mongo_operators.delete_credentials")
+    def test_execute_clears_credentials_from_redis(self, mock_delete_creds):
+        """Test cleanup clears credentials from Redis vault."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
         context = self._make_context(
@@ -813,13 +839,12 @@ class TestCleanUpS3ToMongoTask:
             os.environ.pop("CONTROL_PLANE_DB_URL", None)
             operator.execute(context)
 
-        # Verify XCom delete was called via session.query
-        mock_session = context["ti"].get_session.return_value
-        mock_session.query.assert_called()
-        mock_session.commit.assert_called()
+        # Verify Redis credentials were deleted
+        mock_delete_creds.assert_called_once_with("test_run_123")
 
+    @patch("operators.s3_to_mongo_operators.delete_credentials")
     @patch("operators.s3_to_mongo_operators.create_control_plane_engine")
-    def test_execute_db_error_does_not_fail_cleanup(self, mock_create_engine):
+    def test_execute_db_error_does_not_fail_cleanup(self, mock_create_engine, mock_delete_creds):
         """Test that DB errors don't cause cleanup task to fail."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 
@@ -834,7 +859,8 @@ class TestCleanUpS3ToMongoTask:
             # Should not raise — DB errors are caught and logged
             operator.execute(context)
 
-    def test_execute_with_none_stats(self):
+    @patch("operators.s3_to_mongo_operators.delete_credentials")
+    def test_execute_with_none_stats(self, mock_delete_creds):
         """Test cleanup handles None stats (execute task failed before producing stats)."""
         operator = CleanUpS3ToMongoTask(task_id="cleanup")
 

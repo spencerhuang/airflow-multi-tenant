@@ -21,6 +21,26 @@ from shared_utils.dag_trigger import (
 )
 from shared_utils.mongo_parser import parse_mongo_uri
 from shared_utils.s3_parser import parse_s3_uri
+from shared_utils.secret_provider import (
+    read_secret,
+    get_infra_secrets,
+    reset_infra_secrets,
+    InfraSecrets,
+)
+
+# Redis client is optional — only available when the `redis` package is installed
+# (Airflow containers have it; control_plane and kafka_consumer may not).
+try:
+    from shared_utils.redis_client import (
+        get_redis_client,
+        reset_redis_client,
+        store_credentials,
+        fetch_credentials,
+        delete_credentials,
+        CREDENTIAL_TTL_SECONDS,
+    )
+except ImportError:
+    pass
 
 __all__ = [
     "TimezoneConverter",
@@ -41,4 +61,14 @@ __all__ = [
     "trigger_airflow_dag",
     "parse_mongo_uri",
     "parse_s3_uri",
+    "read_secret",
+    "get_infra_secrets",
+    "reset_infra_secrets",
+    "InfraSecrets",
+    "get_redis_client",
+    "reset_redis_client",
+    "store_credentials",
+    "fetch_credentials",
+    "delete_credentials",
+    "CREDENTIAL_TTL_SECONDS",
 ]

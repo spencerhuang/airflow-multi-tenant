@@ -74,15 +74,18 @@ def setup_database(wait_for_services):
     try:
         # Clean up existing test data (in correct order due to foreign keys)
         from control_plane.app.models.integration import Integration
-        from control_plane.app.models.integration_run import IntegrationRun
+        from control_plane.app.models.integration_run import IntegrationRun, IntegrationRunError
 
         # Delete in correct order: children first, parents last
         # First, get all test integrations
         test_integrations = db.query(Integration).filter(Integration.workspace_id.like("test-%")).all()
         test_integration_ids = [integration.integration_id for integration in test_integrations]
 
-        # Delete integration_runs first (child table)
         if test_integration_ids:
+            # Delete integration_run_errors first (grandchild table)
+            run_ids_subq = db.query(IntegrationRun.run_id).filter(IntegrationRun.integration_id.in_(test_integration_ids))
+            db.query(IntegrationRunError).filter(IntegrationRunError.run_id.in_(run_ids_subq)).delete(synchronize_session=False)
+            # Then delete integration_runs (child table)
             db.query(IntegrationRun).filter(IntegrationRun.integration_id.in_(test_integration_ids)).delete(synchronize_session=False)
 
         # Then delete integrations
@@ -132,7 +135,7 @@ def setup_database(wait_for_services):
     finally:
         # Cleanup (in correct order due to foreign keys)
         from control_plane.app.models.integration import Integration
-        from control_plane.app.models.integration_run import IntegrationRun
+        from control_plane.app.models.integration_run import IntegrationRun, IntegrationRunError
 
         # Delete in correct order: children first, parents last
         try:
@@ -140,8 +143,11 @@ def setup_database(wait_for_services):
             test_integrations = db.query(Integration).filter(Integration.workspace_id.like("test-%")).all()
             test_integration_ids = [integration.integration_id for integration in test_integrations]
 
-            # Delete integration_runs first (child table)
             if test_integration_ids:
+                # Delete integration_run_errors first (grandchild table)
+                run_ids_subq = db.query(IntegrationRun.run_id).filter(IntegrationRun.integration_id.in_(test_integration_ids))
+                db.query(IntegrationRunError).filter(IntegrationRunError.run_id.in_(run_ids_subq)).delete(synchronize_session=False)
+                # Then delete integration_runs (child table)
                 db.query(IntegrationRun).filter(IntegrationRun.integration_id.in_(test_integration_ids)).delete(synchronize_session=False)
 
             # Then delete integrations

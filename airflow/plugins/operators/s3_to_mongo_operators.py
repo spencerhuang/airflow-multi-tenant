@@ -6,7 +6,6 @@ from typing import Dict, Any, List
 from datetime import datetime, timezone
 
 from airflow.sdk import BaseOperator
-from airflow.models import XCom
 from sqlalchemy import select
 
 # Use relative import within plugins directory
@@ -32,6 +31,9 @@ from shared_utils import (
     create_integration_run,
     create_control_plane_engine,
     parse_mongo_uri,
+    store_credentials,
+    fetch_credentials,
+    delete_credentials,
 )
 
 
@@ -91,8 +93,8 @@ class PrepareS3ToMongoTask(PrepareTask):
             self.log.info(f"[trace_id={trace_id}] S3 bucket: {s3_bucket}, prefix: {s3_prefix}")
             self.log.info(f"[trace_id={trace_id}] MongoDB collection: {mongo_collection}")
 
-            # Push credentials to a separate XCom key so downstream tasks
-            # can use them without exposing secrets in the default return value.
+            # Store credentials in Redis transient vault (not XCom) to prevent
+            # sensitive data from leaking into the Airflow metadata database.
             credentials = {
                 "s3_endpoint_url": dag_run_conf.get("s3_endpoint_url", "http://minio:9000"),
                 "s3_access_key": dag_run_conf.get("s3_access_key", "minioadmin"),
@@ -100,8 +102,8 @@ class PrepareS3ToMongoTask(PrepareTask):
                 "mongo_uri": dag_run_conf.get("mongo_uri", "mongodb://root:root@mongodb:27017/"),
                 "mongo_database": dag_run_conf.get("mongo_database", "test_database"),
             }
-            ti.xcom_push(key="credentials", value=credentials)
-            self.log.info(f"[trace_id={trace_id}] Credentials pushed to XCom (separate key)")
+            store_credentials(dag_run.run_id, credentials)
+            self.log.info(f"[trace_id={trace_id}] Credentials stored in Redis (TTL=1800s)")
 
             # Return non-sensitive config (default XCom)
             return {
@@ -141,12 +143,13 @@ class ValidateS3ToMongoTask(ValidateTask):
         Raises:
             Exception: If validation fails
         """
-        # Pull configuration and credentials from XCom
+        # Pull non-sensitive config from XCom; credentials from Redis vault
         ti = context["ti"]
         trace_id = self._get_trace_context(context).trace_id
-        dag_run_id = context.get("dag_run").run_id if context.get("dag_run") else "unknown"
+        dag_run = context.get("dag_run")
+        dag_run_id = dag_run.run_id if dag_run else "unknown"
         config = ti.xcom_pull(task_ids="prepare")
-        credentials = ti.xcom_pull(task_ids="prepare", key="credentials")
+        credentials = fetch_credentials(dag_run_id)
 
         self.log.info(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Validating S3 to MongoDB configuration: {config}")
 
@@ -219,12 +222,13 @@ class ExecuteS3ToMongoTask(TraceIdMixin, BaseOperator):
         Returns:
             Execution statistics
         """
-        # Pull configuration and credentials from XCom
+        # Pull non-sensitive config from XCom; credentials from Redis vault
         ti = context["ti"]
         trace_id = self._get_trace_context(context).trace_id
-        dag_run_id = context.get("dag_run").run_id if context.get("dag_run") else "unknown"
+        dag_run = context.get("dag_run")
+        dag_run_id = dag_run.run_id if dag_run else "unknown"
         config = ti.xcom_pull(task_ids="prepare")
-        credentials = ti.xcom_pull(task_ids="prepare", key="credentials")
+        credentials = fetch_credentials(dag_run_id)
 
         self.log.info(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Executing S3 to MongoDB transfer: {config}")
 
@@ -405,31 +409,21 @@ class CleanUpS3ToMongoTask(CleanUpTask):
 
         dag_run_id = dag_run.run_id
 
-        # 2. Clear sensitive credential data from XCom
-        self._clear_sensitive_xcom(context, trace_id, dag_run_id)
+        # 2. Clear sensitive credential data from Redis transient vault
+        self._clear_credentials(dag_run_id, trace_id)
 
         # 3. Update IntegrationRun status in control plane database
         self._update_integration_run_status(context, integration_id, trace_id, dag_run_id)
 
         self.log.info(f"[trace_id={trace_id}] Cleanup complete")
 
-    def _clear_sensitive_xcom(self, context: Dict[str, Any], trace_id: str, dag_run_id: str) -> None:
-        """Delete the 'credentials' XCom key pushed by PrepareTask."""
+    def _clear_credentials(self, dag_run_id: str, trace_id: str) -> None:
+        """Delete transient credentials from Redis vault."""
         try:
-            dag_run = context.get("dag_run")
-            ti = context["ti"]
-            session = ti.get_session()
-
-            session.query(XCom).filter(
-                XCom.dag_id == dag_run.dag_id,
-                XCom.task_id == "prepare",
-                XCom.run_id == dag_run.run_id,
-                XCom.key == "credentials",
-            ).delete()
-            session.commit()
-            self.log.info(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Step 2: Cleared sensitive 'credentials' XCom data")
+            delete_credentials(dag_run_id)
+            self.log.info(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Step 2: Cleared credentials from Redis")
         except Exception as e:
-            self.log.warning(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Step 2: Could not clear XCom credentials: {e}")
+            self.log.warning(f"[trace_id={trace_id}][dag_run_id={dag_run_id}] Step 2: Could not clear Redis credentials: {e}")
 
     def _update_integration_run_status(
         self,

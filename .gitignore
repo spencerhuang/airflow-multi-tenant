@@ -312,6 +312,8 @@ dags/__pycache__/
 
 # Secrets and credentials
 secrets/
+docker/secrets/*
+!docker/secrets/.gitkeep
 *.pem
 *.key
 *.crt

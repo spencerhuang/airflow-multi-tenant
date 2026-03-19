@@ -2,28 +2,36 @@ version: '3.8'
 
 x-airflow-common: &airflow-common
   image: apache/airflow:3.0.6-python3.11
+  entrypoint: ["/opt/airflow/entrypoint-secrets.sh"]
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
-    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres-airflow/${POSTGRES_DB:-airflow}
+    # Fernet key loaded from Docker secret via entrypoint-secrets.sh
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'false'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     # Airflow 3: FAB auth manager replaces legacy auth backends
     AIRFLOW__CORE__AUTH_MANAGER: 'airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager'
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'true'
-    AIRFLOW__WEBSERVER__SECRET_KEY: 'airflow-secret-key-change-in-production'
-    AIRFLOW__API__SECRET_KEY: 'airflow-secret-key-change-in-production'
-    AIRFLOW__CORE__INTERNAL_API_SECRET_KEY: 'airflow-internal-api-secret-key'
-    AIRFLOW__API_AUTH__JWT_SECRET: 'airflow-jwt-secret-change-in-production'
+    AIRFLOW__WEBSERVER__SECRET_KEY: '${AIRFLOW_WEBSERVER_SECRET_KEY:-airflow-secret-key-change-in-production}'
+    AIRFLOW__API__SECRET_KEY: '${AIRFLOW_API_SECRET_KEY:-airflow-secret-key-change-in-production}'
+    AIRFLOW__CORE__INTERNAL_API_SECRET_KEY: '${AIRFLOW_INTERNAL_API_SECRET_KEY:-airflow-internal-api-secret-key}'
+    AIRFLOW__API_AUTH__JWT_SECRET: '${AIRFLOW_JWT_SECRET:-airflow-jwt-secret-change-in-production}'
     # Airflow 3: Execution API URL required for task SDK communication
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
     PYTHONPATH: /opt/airflow
-    _PIP_ADDITIONAL_REQUIREMENTS: 'boto3 pymongo pymysql apache-airflow-providers-fab'
-    CONTROL_PLANE_DB_URL: 'mysql+pymysql://control_plane:control_plane@mysql:3306/control_plane'
+    _PIP_ADDITIONAL_REQUIREMENTS: 'boto3 pymongo pymysql apache-airflow-providers-fab redis>=5.0.0'
+    CONTROL_PLANE_DB_URL: 'mysql+pymysql://${MYSQL_USER:-control_plane}:${MYSQL_PASSWORD:-control_plane}@mysql:3306/${MYSQL_DATABASE:-control_plane}'
     # Airflow internal API (for dispatcher tasks that self-trigger DAGs)
     AIRFLOW_INTERNAL_API_URL: 'http://airflow-apiserver:8080/api/v2'
-    AIRFLOW_USERNAME: 'airflow'
-    AIRFLOW_PASSWORD: 'airflow'
+    AIRFLOW_USERNAME: '${AIRFLOW_USERNAME:-airflow}'
+    AIRFLOW_PASSWORD: '${AIRFLOW_PASSWORD:-airflow}'
+    # Redis (transient credential vault)
+    REDIS_HOST: redis
+    REDIS_PORT: '6379'
+    REDIS_PASSWORD: '${REDIS_PASSWORD:-changeme_redis}'
+  secrets:
+    - fernet_key
+    - redis_password
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/plugins:/opt/airflow/plugins
@@ -31,10 +39,13 @@ x-airflow-common: &airflow-common
     - ./connectors:/opt/airflow/connectors
     - ./packages/shared_models/shared_models:/opt/airflow/shared_models
     - ./packages/shared_utils/shared_utils:/opt/airflow/shared_utils
+    - ./docker/entrypoint-secrets.sh:/opt/airflow/entrypoint-secrets.sh:ro
     - airflow-logs:/opt/airflow/logs
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on: &airflow-common-depends-on
     postgres-airflow:
+      condition: service_healthy
+    redis:
       condition: service_healthy
 
 services:
@@ -43,10 +54,10 @@ services:
     image: mysql:8.0
     container_name: control-plane-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: root
-      MYSQL_DATABASE: control_plane
-      MYSQL_USER: control_plane
-      MYSQL_PASSWORD: control_plane
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-control_plane}
+      MYSQL_USER: ${MYSQL_USER:-control_plane}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-control_plane}
     ports:
       - "3306:3306"
     volumes:
@@ -64,9 +75,9 @@ services:
     image: postgres:15
     container_name: airflow-postgres
     environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
     ports:
       - "5432:5432"
     volumes:
@@ -82,9 +93,9 @@ services:
     image: mongo:7.0
     container_name: mongodb
     environment:
-      MONGO_INITDB_ROOT_USERNAME: root
-      MONGO_INITDB_ROOT_PASSWORD: root
-      MONGO_INITDB_DATABASE: test_database
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-root}
+      MONGO_INITDB_DATABASE: ${MONGO_DATABASE:-test_database}
     ports:
       - "27017:27017"
     volumes:
@@ -102,8 +113,8 @@ services:
     container_name: minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -114,6 +125,21 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Redis (transient credential vault for Airflow tasks)
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-changeme_redis}"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme_redis}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - redis-data:/data
 
   # Kafka (for CDC)
   zookeeper:
@@ -295,22 +321,26 @@ services:
     command:
       - -c
       - |
+        # Load secrets from Docker secrets files
+        if [ -f /run/secrets/fernet_key ]; then
+          export AIRFLOW__CORE__FERNET_KEY=$(cat /run/secrets/fernet_key)
+        fi
         mkdir -p /sources/logs /sources/dags /sources/plugins
         chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
         /entrypoint airflow db migrate
         airflow users create \
-          --username airflow \
+          --username ${AIRFLOW_USERNAME:-airflow} \
           --firstname Airflow \
           --lastname Admin \
           --role Admin \
           --email admin@example.com \
-          --password airflow || true
+          --password ${AIRFLOW_PASSWORD:-airflow} || true
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'
       _AIRFLOW_WWW_USER_CREATE: 'true'
-      _AIRFLOW_WWW_USER_USERNAME: airflow
-      _AIRFLOW_WWW_USER_PASSWORD: airflow
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USERNAME:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD:-airflow}
     user: "0:0"
     volumes:
       - ./airflow:/sources
@@ -326,10 +356,10 @@ services:
              python -m alembic upgrade head &&
              uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
     environment:
-      DATABASE_URL: mysql+aiomysql://control_plane:control_plane@mysql:3306/control_plane
+      DATABASE_URL: mysql+aiomysql://${MYSQL_USER:-control_plane}:${MYSQL_PASSWORD:-control_plane}@mysql:3306/${MYSQL_DATABASE:-control_plane}
       AIRFLOW_API_URL: http://airflow-apiserver:8080/api/v2
-      AIRFLOW_USERNAME: airflow
-      AIRFLOW_PASSWORD: airflow
+      AIRFLOW_USERNAME: '${AIRFLOW_USERNAME:-airflow}'
+      AIRFLOW_PASSWORD: '${AIRFLOW_PASSWORD:-airflow}'
     ports:
       - "8000:8000"
     depends_on:
@@ -351,10 +381,10 @@ services:
     command: >
       uvicorn kafka_consumer.app.main:app --host 0.0.0.0 --port 8001 --reload
     environment:
-      DATABASE_URL: mysql+pymysql://control_plane:control_plane@mysql:3306/control_plane
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER:-control_plane}:${MYSQL_PASSWORD:-control_plane}@mysql:3306/${MYSQL_DATABASE:-control_plane}
       AIRFLOW_API_URL: http://airflow-apiserver:8080/api/v2
-      AIRFLOW_USERNAME: airflow
-      AIRFLOW_PASSWORD: airflow
+      AIRFLOW_USERNAME: '${AIRFLOW_USERNAME:-airflow}'
+      AIRFLOW_PASSWORD: '${AIRFLOW_PASSWORD:-airflow}'
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
     ports:
       - "8001:8001"
@@ -375,9 +405,16 @@ services:
       - ./packages/shared_models/shared_models:/app/shared_models
       - ./packages/shared_utils/shared_utils:/app/shared_utils
 
+secrets:
+  fernet_key:
+    file: ./docker/secrets/fernet_key
+  redis_password:
+    file: ./docker/secrets/redis_password
+
 volumes:
   mysql-data:
   postgres-airflow-data:
   mongodb-data:
   minio-data:
+  redis-data:
   airflow-logs:

@@ -806,19 +806,198 @@ This keeps the production image minimal (only adds ~3KB) while the JDK build too
 
 ---
 
+## Security Overhaul: Unified Secret Management & Transient Credential Vault
+
+### The Problem
+
+The project had several security gaps:
+
+1. **Hardcoded credentials** in `docker-compose.yml` (MySQL, Postgres, MongoDB, MinIO passwords as literal strings)
+2. **Empty Fernet key** — Airflow Variables and Connections stored unencrypted in the metadata DB
+3. **Customer credentials leaked through XCom** — sensitive S3/Mongo auth data persisted in the Airflow metadata database (`xcom` table), accessible to anyone with DB read access
+4. **No unified secret management** — each service resolved secrets independently with inconsistent patterns
+
+### Design Principles
+
+- **Infrastructure vs. customer credentials**: Infrastructure secrets (MySQL, Postgres, Redis, Airflow passwords) are loaded once at startup via `InfraSecrets`. Customer credentials (S3/Mongo creds from the `auths` table) are ephemeral, stored transiently in Redis per DAG run.
+- **Environment-agnostic resolution**: The same code runs on Docker (dev) and Kubernetes (prod) without changes. A three-tier resolution order — file, env var, default — abstracts both Docker secrets and K8s mounted volumes.
+- **Adaptive TLS**: Redis client auto-detects the environment by checking for a CA certificate file. Production gets mTLS; development gets plain TCP with no extra setup.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Secret Resolution Flow                      │
+│                                                                 │
+│  K8s Secret volume ──┐                                          │
+│  Docker secret file ─┤──> /run/secrets/{key} ──┐               │
+│                      │                          ├──> read_secret│
+│  Environment var ────┘──> os.environ[KEY] ─────┘     (unified) │
+│                                                       │         │
+│                              Default value ───────────┘         │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│              Customer Credential Flow (per DAG run)             │
+│                                                                 │
+│  PrepareTask ──store_credentials(run_id, creds)──> Redis SETEX  │
+│       │                                           (TTL=1800s)   │
+│       v                                                         │
+│  ValidateTask ──fetch_credentials(run_id)────────> Redis GET    │
+│       │                                                         │
+│       v                                                         │
+│  ExecuteTask ──fetch_credentials(run_id)─────────> Redis GET    │
+│       │                                                         │
+│       v                                                         │
+│  CleanUpTask ──delete_credentials(run_id)────────> Redis DELETE │
+│                                                                 │
+│  Key format: airflow:run_{dag_run_id}:creds                     │
+│  If TTL expires before cleanup: AirflowFailException            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Component 1: Unified Secret Provider
+
+**File**: `packages/shared_utils/shared_utils/secret_provider.py`
+
+`read_secret(key, default)` resolves secrets in order:
+1. Filesystem: `/run/secrets/{key.lower()}`
+2. Environment variable: `os.environ[key.upper()]`
+3. Default value
+
+`InfraSecrets` is a frozen dataclass loaded once via `get_infra_secrets()` (singleton):
+
+| Field | Default (dev) | Source |
+|---|---|---|
+| `mysql_password` | `control_plane` | Control plane DB |
+| `postgres_password` | `airflow` | Airflow metadata DB |
+| `redis_password` | `changeme_redis` | Redis transient vault |
+| `airflow_fernet_key` | `""` | Variable/Connection encryption |
+| `airflow_webserver_secret` | `airflow-secret-key-...` | Session cookies |
+| `airflow_password` | `airflow` | API authentication |
+| `kafka_password` | `None` | Future SASL support |
+
+Customer credentials (S3, MongoDB, MinIO) are **not** in `InfraSecrets` — they come from the business database `auths` table and flow through the Redis transient vault.
+
+### Component 2: TLS-Aware Redis Client
+
+**File**: `packages/shared_utils/shared_utils/redis_client.py`
+
+Singleton client with adaptive TLS:
+- Checks `os.path.isfile("/etc/ssl/redis/ca.crt")`
+- If present: `ssl=True`, `ssl_ca_certs`, `ssl_certfile`, `ssl_keyfile`
+- If absent: plain TCP (development)
+
+Credential vault helpers:
+- `store_credentials(dag_run_id, creds, ttl=1800)` — atomic `SETEX`
+- `fetch_credentials(dag_run_id)` — `GET` or raise `AirflowFailException`
+- `delete_credentials(dag_run_id)` — explicit `DELETE`
+
+The `redis` package is optional — import is wrapped in `try/except ImportError` in `__init__.py` so control_plane and kafka_consumer (which don't need Redis) aren't affected.
+
+### Component 3: Fernet Key from Docker Secret
+
+**Files**: `scripts/generate_fernet_key.py`, `docker/entrypoint-secrets.sh`
+
+- `generate_fernet_key.py` generates a Fernet key into `docker/secrets/fernet_key` (idempotent — won't overwrite existing)
+- `entrypoint-secrets.sh` reads Docker secret files into environment variables before exec-ing the Airflow entrypoint:
+  ```bash
+  export AIRFLOW__CORE__FERNET_KEY=$(cat /run/secrets/fernet_key)
+  export REDIS_PASSWORD=$(cat /run/secrets/redis_password)
+  exec /entrypoint "$@"
+  ```
+- Docker Compose mounts secrets via the top-level `secrets:` block
+
+### Component 4: Operator Changes (XCom to Redis)
+
+**File**: `airflow/plugins/operators/s3_to_mongo_operators.py`
+
+| Task | Before | After |
+|---|---|---|
+| PrepareTask | `ti.xcom_push(key="credentials", value=creds)` | `store_credentials(dag_run.run_id, creds)` |
+| ValidateTask | `ti.xcom_pull(task_ids="prepare", key="credentials")` | `fetch_credentials(dag_run_id)` |
+| ExecuteTask | `ti.xcom_pull(task_ids="prepare", key="credentials")` | `fetch_credentials(dag_run_id)` |
+| CleanUpTask | `_clear_sensitive_xcom()` (DELETE from xcom table) | `delete_credentials(dag_run_id)` |
+
+Non-sensitive configuration (bucket names, collection names, integration IDs) still flows through XCom. Only sensitive auth material moves to Redis.
+
+### Component 5: Service Configuration Integration
+
+Both the control plane and kafka consumer use `@model_validator(mode="after")` in their Pydantic `Settings` classes to override sensitive fields via the unified secret provider:
+
+**`control_plane/app/core/config.py`**:
+```python
+@model_validator(mode="after")
+def _resolve_secrets(self) -> "Settings":
+    secret_key = read_secret("SECRET_KEY")
+    if secret_key:
+        object.__setattr__(self, "SECRET_KEY", secret_key)
+    airflow_pw = read_secret("AIRFLOW_PASSWORD")
+    if airflow_pw:
+        object.__setattr__(self, "AIRFLOW_PASSWORD", airflow_pw)
+    return self
+```
+
+**`kafka_consumer/app/core/config.py`**: Same pattern for `AIRFLOW_PASSWORD` and `KAFKA_PASSWORD`.
+
+**`packages/shared_utils/shared_utils/db.py`**: `_build_default_db_url()` uses `get_infra_secrets().mysql_password` when constructing the control plane DB URL from components (fallback when `CONTROL_PLANE_DB_URL` env var is not set).
+
+### Component 6: Docker Compose Hardening
+
+**File**: `docker-compose.yml`
+
+- All hardcoded passwords replaced with `${VAR:-default}` pattern
+- Redis service added (`redis:7-alpine`, password-protected, health-checked)
+- Docker secrets block for `fernet_key` and `redis_password`
+- Custom entrypoint on all Airflow services
+- `redis>=5.0.0` added to `_PIP_ADDITIONAL_REQUIREMENTS`
+
+### Component 7: Kubernetes Template
+
+**File**: `k8s/secrets/infra-secrets.yaml`
+
+Opaque Secret with placeholder `stringData` for all infrastructure secrets. Intended to be mounted at `/run/secrets/` via a volume mount. Not used in testing — Docker-only workflow for now.
+
+### Test Coverage
+
+**Shared Utils Tests**:
+
+| Test file | Coverage |
+|---|---|
+| `packages/shared_utils/tests/test_secret_provider.py` | File/env/default resolution, case-insensitive lookup, empty file skipping, `InfraSecrets.load()`, singleton, frozen dataclass |
+| `packages/shared_utils/tests/test_redis_client.py` | Plain TCP vs TLS detection, singleton, custom host/port, store/fetch/delete credentials, TTL, missing key exception |
+
+**Operator Tests** (`airflow/tests/test_s3_to_mongo_operators.py`):
+- PrepareTask: asserts `store_credentials` called with `dag_run.run_id`
+- Validate/Execute: asserts `fetch_credentials` returns expected dict
+- CleanUp: asserts `delete_credentials` called with `dag_run_id`
+
+### Files Created/Modified
+
+| File | Status | Purpose |
+|---|---|---|
+| `packages/shared_utils/shared_utils/secret_provider.py` | New | Unified secret resolution + InfraSecrets |
+| `packages/shared_utils/shared_utils/redis_client.py` | New | TLS-aware Redis + credential vault |
+| `scripts/generate_fernet_key.py` | New | Fernet key generation |
+| `docker/entrypoint-secrets.sh` | New | Docker secret to env var bridge |
+| `docker/secrets/.gitkeep` | New | Gitignored secrets directory |
+| `k8s/secrets/infra-secrets.yaml` | New | K8s secrets template |
+| `packages/shared_utils/tests/test_secret_provider.py` | New | Secret provider tests |
+| `packages/shared_utils/tests/test_redis_client.py` | New | Redis client tests |
+| `docker-compose.yml` | Modified | Redis service, secrets, password variables |
+| `packages/shared_utils/shared_utils/__init__.py` | Modified | New exports (secret_provider, redis_client) |
+| `packages/shared_utils/shared_utils/db.py` | Modified | Secret-aware DB URL construction |
+| `control_plane/app/core/config.py` | Modified | Pydantic secret resolution |
+| `kafka_consumer/app/core/config.py` | Modified | Pydantic secret resolution |
+| `airflow/plugins/operators/s3_to_mongo_operators.py` | Modified | XCom to Redis for credentials |
+| `airflow/tests/test_s3_to_mongo_operators.py` | Modified | Redis mock assertions |
+| `.gitignore` | Modified | `docker/secrets/*` |
+| `.env.example` | Modified | All new env vars documented |
+
+---
+
 ## Summary
 
-✅ **Extracted**: Kafka consumer into standalone FastAPI microservice (port 8001)
-✅ **Decoupled**: Control plane is now a pure stateless REST API (no Kafka dependency)
-✅ **Tested**: 18 comprehensive test cases for the consumer service
-✅ **Observable**: Liveness, readiness, and detailed health endpoints
-✅ **Containerized**: Dedicated Dockerfile and docker-compose service
-✅ **Documented**: Architecture, configuration, and operational guides updated
+**Kafka Consumer Service**: Standalone FastAPI microservice (port 8001) — scales independently, Kafka consumer group rebalancing, health endpoints, modern lifespan management, direct MySQL via pymysql, Core tables (no ORM dependency).
 
-The Kafka consumer now runs as an independent microservice that:
-- Scales independently from the control plane
-- Supports failover via Kafka consumer group rebalancing
-- Provides health endpoints for container orchestration
-- Uses modern FastAPI lifespan for clean startup/shutdown
-- Connects directly to MySQL via pymysql (no aiomysql dependency)
-- Uses `shared_models` Core tables directly (no ORM dependency)
+**Security Overhaul**: Unified secret provider (file/env/default), Fernet encryption via Docker secrets, Redis transient credential vault (30-min TTL, atomic SETEX, adaptive TLS), customer credentials removed from XCom/metadata DB, all hardcoded passwords replaced with env var substitution.
