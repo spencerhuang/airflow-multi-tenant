@@ -163,8 +163,8 @@ class TestIntegrationEndpoints:
         get_response = client.get(f"/api/v1/integrations/{integration_id}")
         assert get_response.status_code == 404
 
-    @patch("control_plane.app.services.integration_service.get_airflow_auth_headers")
-    @patch("control_plane.app.services.integration_service.requests.post")
+    @patch("shared_utils.dag_trigger.get_airflow_auth_headers")
+    @patch("shared_utils.dag_trigger.requests.post")
     def test_trigger_integration(self, mock_post, mock_auth_headers, client, sample_data):
         """Test triggering an integration."""
         mock_auth_headers.return_value = {"Authorization": "Bearer token", "Content-Type": "application/json"}

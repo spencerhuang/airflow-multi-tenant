@@ -884,8 +884,8 @@ class TestDispatchScheduledIntegrationsTask:
         row.json_data = json_data
         return row
 
-    @patch("operators.dispatch_operators.get_airflow_auth_headers")
-    @patch("operators.dispatch_operators.requests.post")
+    @patch("shared_utils.dag_trigger.get_airflow_auth_headers")
+    @patch("shared_utils.dag_trigger.requests.post")
     @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
     def test_dispatch_success(self, mock_config, mock_engine_cls, mock_post, mock_auth_headers):
@@ -978,8 +978,8 @@ class TestDispatchScheduledIntegrationsTask:
         assert result["dispatched"] == 0
         assert result["total"] == 0
 
-    @patch("operators.dispatch_operators.get_airflow_auth_headers")
-    @patch("operators.dispatch_operators.requests.post")
+    @patch("shared_utils.dag_trigger.get_airflow_auth_headers")
+    @patch("shared_utils.dag_trigger.requests.post")
     @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
     def test_dispatch_continues_on_error(self, mock_config, mock_engine_cls, mock_post, mock_auth_headers):
