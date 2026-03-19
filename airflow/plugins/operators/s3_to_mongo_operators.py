@@ -31,6 +31,7 @@ from shared_utils import (
     pull_all_task_errors,
     create_integration_run,
     create_control_plane_engine,
+    parse_mongo_uri,
 )
 
 
@@ -176,25 +177,9 @@ class ValidateS3ToMongoTask(ValidateTask):
 
             # 2. Validate MongoDB connection using connector
             self.log.info(f"[trace_id={trace_id}] Validating MongoDB connection")
-            if "@" in mongo_uri:
-                auth_part = mongo_uri.split("@")[0].replace("mongodb://", "")
-                host_part = mongo_uri.split("@")[1].rstrip("/")
-                username, password = auth_part.split(":")
-                host = host_part.split(":")[0]
-                port = int(host_part.split(":")[1]) if ":" in host_part else 27017
-            else:
-                username = password = None
-                host_part = mongo_uri.replace("mongodb://", "").rstrip("/")
-                host = host_part.split(":")[0]
-                port = int(host_part.split(":")[1]) if ":" in host_part else 27017
-
-            mongo_auth = MongoAuth(
-                host=host,
-                port=port,
-                username=username,
-                password=password,
-                database=mongo_database,
-            )
+            parsed = parse_mongo_uri(mongo_uri)
+            parsed["database"] = mongo_database  # config override
+            mongo_auth = MongoAuth.from_dict(parsed)
             mongo_client = MongoClient(mongo_auth)
 
             # Test connection by listing collections
@@ -275,28 +260,10 @@ class ExecuteS3ToMongoTask(TraceIdMixin, BaseOperator):
             s3_reader = S3Reader(s3_client)
 
             # 2. Initialize MongoDB connector (reusable)
-            # Parse MongoDB URI for connection details
-            # Format: mongodb://user:pass@host:port/
-            if "@" in mongo_uri:
-                auth_part = mongo_uri.split("@")[0].replace("mongodb://", "")
-                host_part = mongo_uri.split("@")[1].rstrip("/")
-                username, password = auth_part.split(":")
-                host = host_part.split(":")[0]
-                port = int(host_part.split(":")[1]) if ":" in host_part else 27017
-            else:
-                username = password = None
-                host_part = mongo_uri.replace("mongodb://", "").rstrip("/")
-                host = host_part.split(":")[0]
-                port = int(host_part.split(":")[1]) if ":" in host_part else 27017
-
-            self.log.info(f"Connecting to MongoDB using connector: {host}:{port}")
-            mongo_auth = MongoAuth(
-                host=host,
-                port=port,
-                username=username,
-                password=password,
-                database=mongo_database,
-            )
+            parsed = parse_mongo_uri(mongo_uri)
+            parsed["database"] = mongo_database  # config override
+            self.log.info(f"Connecting to MongoDB using connector: {parsed['host']}:{parsed['port']}")
+            mongo_auth = MongoAuth.from_dict(parsed)
             mongo_client = MongoClient(mongo_auth)
 
             # 3. List S3 objects using connector

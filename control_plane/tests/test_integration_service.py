@@ -215,58 +215,73 @@ class TestIntegrationService:
         assert result is False
         mock_db.delete.assert_not_called()
 
-    def test_get_dag_id_for_integration_daily(self, service, sample_integration):
-        """Test getting DAG ID for daily integration."""
-        dag_id = service._get_dag_id_for_integration(sample_integration)
+    def test_determine_dag_id_daily(self, service, sample_integration):
+        """Test determining DAG ID for daily integration via shared function."""
+        from shared_utils import determine_dag_id
+        dag_id = determine_dag_id(
+            sample_integration.integration_type,
+            sample_integration.schedule_type,
+            sample_integration.utc_sch_cron,
+        )
         assert dag_id == "s3_to_mongo_daily_02"
 
-    def test_get_dag_id_for_integration_ondemand(self, service, sample_integration):
-        """Test getting DAG ID for on-demand integration."""
-        sample_integration.schedule_type = "on_demand"
-        sample_integration.usr_sch_cron = None
-        sample_integration.utc_sch_cron = None
-
-        dag_id = service._get_dag_id_for_integration(sample_integration)
+    def test_determine_dag_id_ondemand(self, service, sample_integration):
+        """Test determining DAG ID for on-demand integration."""
+        from shared_utils import determine_dag_id
+        dag_id = determine_dag_id(
+            sample_integration.integration_type,
+            "on_demand",
+            None,
+        )
         assert dag_id == "s3_to_mongo_ondemand"
 
-    def test_get_dag_id_for_integration_invalid_cron(self, service, sample_integration):
-        """Test getting DAG ID with invalid cron format."""
-        sample_integration.utc_sch_cron = "invalid"
-
-        dag_id = service._get_dag_id_for_integration(sample_integration)
+    def test_determine_dag_id_invalid_cron(self, service, sample_integration):
+        """Test determining DAG ID with invalid cron format."""
+        from shared_utils import determine_dag_id
+        dag_id = determine_dag_id(
+            sample_integration.integration_type,
+            sample_integration.schedule_type,
+            "invalid",
+        )
         assert dag_id == "s3_to_mongo_ondemand"
 
-    @patch("control_plane.app.services.integration_service.get_airflow_auth_headers")
-    @patch("control_plane.app.services.integration_service.requests.post")
+    @patch("shared_utils.dag_trigger.get_airflow_auth_headers")
+    @patch("shared_utils.dag_trigger.requests.post")
     def test_trigger_airflow_dag_success(self, mock_post, mock_auth_headers, service):
-        """Test triggering Airflow DAG successfully."""
+        """Test triggering Airflow DAG successfully via shared function."""
+        from shared_utils import trigger_airflow_dag
         mock_auth_headers.return_value = {"Authorization": "Bearer token", "Content-Type": "application/json"}
         mock_response = Mock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"dag_run_id": "manual__2024-01-01T00:00:00"}
         mock_post.return_value = mock_response
 
-        dag_run_id = service._trigger_airflow_dag("s3_to_mongo_ondemand", {"key": "value"})
+        dag_run_id = trigger_airflow_dag(
+            "http://localhost:8080/api/v2", "airflow", "airflow",
+            "s3_to_mongo_ondemand", {"tenant_id": "test", "key": "value"},
+        )
 
         assert dag_run_id == "manual__2024-01-01T00:00:00"
         mock_post.assert_called_once()
 
-    @patch("control_plane.app.services.integration_service.get_airflow_auth_headers")
-    @patch("control_plane.app.services.integration_service.requests.post")
+    @patch("shared_utils.dag_trigger.get_airflow_auth_headers")
+    @patch("shared_utils.dag_trigger.requests.post")
     def test_trigger_airflow_dag_failure(self, mock_post, mock_auth_headers, service):
-        """Test triggering Airflow DAG with failure."""
+        """Test triggering Airflow DAG with failure via shared function."""
         import requests
+        from shared_utils import trigger_airflow_dag
         mock_auth_headers.return_value = {"Authorization": "Bearer token", "Content-Type": "application/json"}
         mock_post.side_effect = requests.exceptions.RequestException("Connection failed")
 
-        with pytest.raises(Exception) as exc_info:
-            service._trigger_airflow_dag("s3_to_mongo_ondemand", {"key": "value"})
-
-        assert "Failed to trigger Airflow DAG" in str(exc_info.value)
+        with pytest.raises(requests.exceptions.RequestException):
+            trigger_airflow_dag(
+                "http://localhost:8080/api/v2", "airflow", "airflow",
+                "s3_to_mongo_ondemand", {"tenant_id": "test", "key": "value"},
+            )
 
     @pytest.mark.asyncio
-    @patch("control_plane.app.services.integration_service.get_airflow_auth_headers")
-    @patch("control_plane.app.services.integration_service.requests.post")
+    @patch("shared_utils.dag_trigger.get_airflow_auth_headers")
+    @patch("shared_utils.dag_trigger.requests.post")
     async def test_trigger_dag_run_success(self, mock_post, mock_auth_headers, service, mock_db, sample_integration):
         """Test full trigger_dag_run flow."""
         mock_auth_headers.return_value = {"Authorization": "Bearer token", "Content-Type": "application/json"}

@@ -9,21 +9,21 @@ This keeps each integration isolated in its own DAG run with proper
 IntegrationRun tracking.
 """
 
-import json
-import os
-from datetime import datetime, timezone
 from typing import Any, Dict, List
 
-import requests
 from airflow.sdk import BaseOperator
 from sqlalchemy import select
 
 from config.airflow_config import get_control_plane_config
-from shared_models.tables import (
-    auths as auths_table,
-    integrations as integrations_table,
+from shared_models.tables import integrations as integrations_table
+from shared_utils import (
+    create_control_plane_engine,
+    TraceContext,
+    build_integration_conf,
+    merge_json_data,
+    resolve_auth_credentials_sync,
+    trigger_airflow_dag,
 )
-from shared_utils import get_airflow_auth_headers, create_control_plane_engine, TraceContext
 
 
 class DispatchScheduledIntegrationsTask(BaseOperator):
@@ -159,70 +159,27 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
         return None
 
     def _build_conf(self, engine, row) -> Dict[str, Any]:
-        """Build DAG run conf — same pattern as integration_service/kafka_consumer."""
-        conf = {
-            "tenant_id": row.workspace_id,
-            "integration_id": row.integration_id,
-            "integration_type": row.integration_type,
-            "auth_id": row.auth_id,
-            "source_access_pt_id": row.source_access_pt_id,
-            "dest_access_pt_id": row.dest_access_pt_id,
-            "traceparent": TraceContext.new().traceparent,
-        }
+        """Build DAG run conf using shared utilities."""
+        conf = build_integration_conf(row)
+        conf["traceparent"] = TraceContext.new().traceparent
 
-        # Merge integration json_data (non-sensitive workflow config)
-        if row.json_data:
-            try:
-                conf.update(json.loads(row.json_data))
-            except json.JSONDecodeError:
-                self.log.warning(
-                    f"Invalid json_data for integration {row.integration_id}"
-                )
+        merge_json_data(conf, row.json_data, log=self.log)
 
-        # Resolve credentials from workspace's Auth records
-        with engine.connect() as conn:
-            auth_rows = conn.execute(
-                select(auths_table.c.auth_type, auths_table.c.json_data).where(
-                    auths_table.c.workspace_id == row.workspace_id
-                )
-            ).fetchall()
+        auth_creds = resolve_auth_credentials_sync(engine, row.workspace_id, log=self.log)
+        conf.update(auth_creds)
 
-        for auth_row in auth_rows:
-            if auth_row.json_data:
-                try:
-                    conf.update(json.loads(auth_row.json_data))
-                except json.JSONDecodeError:
-                    self.log.warning(
-                        f"Invalid auth json_data for workspace {row.workspace_id}"
-                    )
-
-        self.log.info(
-            f"Resolved {len(auth_rows)} auth record(s) for workspace {row.workspace_id}"
-        )
         return conf
 
     def _trigger_ondemand_dag(self, conf: Dict[str, Any], config) -> str:
-        """Trigger the ondemand DAG via Airflow REST API."""
-        # Build DAG ID: e.g., "s3_to_mongo_ondemand"
+        """Trigger the ondemand DAG using shared utility."""
         dag_id = f"{self.integration_type}_ondemand"
-
-        api_url = config.airflow_internal_api_url
-        airflow_username = config.airflow_username
-        airflow_password = config.airflow_password
-
-        tenant_id = conf.get("tenant_id", "unknown")
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:17]
-        custom_run_id = f"{tenant_id}_{dag_id}_scheduled_{timestamp}"
-
-        payload = {
-            "dag_run_id": custom_run_id,
-            "logical_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "conf": conf,
-        }
-
-        headers = get_airflow_auth_headers(api_url, airflow_username, airflow_password)
-        url = f"{api_url}/dags/{dag_id}/dagRuns"
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        response.raise_for_status()
-        return response.json().get("dag_run_id", custom_run_id)
+        return trigger_airflow_dag(
+            config.airflow_internal_api_url,
+            config.airflow_username,
+            config.airflow_password,
+            dag_id,
+            conf,
+            trigger_source="scheduled",
+            log=self.log,
+        )
 

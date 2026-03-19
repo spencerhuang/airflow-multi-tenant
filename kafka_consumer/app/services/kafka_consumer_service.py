@@ -578,7 +578,14 @@ class KafkaConsumerService:
         """
         import json as json_module
         from sqlalchemy import create_engine, select, func
-        from shared_models.tables import integrations as integrations_t, integration_runs as integration_runs_t, auths as auths_t
+        from shared_models.tables import integrations as integrations_t, integration_runs as integration_runs_t
+        from shared_utils import (
+            build_integration_conf,
+            merge_json_data,
+            resolve_auth_credentials_sync,
+            determine_dag_id,
+            trigger_airflow_dag,
+        )
 
         integration_id = data.get("integration_id")
         logger.info(
@@ -601,19 +608,9 @@ class KafkaConsumerService:
             # --- Step 2: Query integration from DB (both paths need this) ---
             with engine.connect() as conn:
                 row = conn.execute(
-                    select(
-                        integrations_t.c.integration_id,
-                        integrations_t.c.workspace_id,
-                        integrations_t.c.workflow_id,
-                        integrations_t.c.auth_id,
-                        integrations_t.c.source_access_pt_id,
-                        integrations_t.c.dest_access_pt_id,
-                        integrations_t.c.integration_type,
-                        integrations_t.c.usr_sch_cron,
-                        integrations_t.c.utc_sch_cron,
-                        integrations_t.c.schedule_type,
-                        integrations_t.c.json_data,
-                    ).where(integrations_t.c.integration_id == integration_id)
+                    select(integrations_t).where(
+                        integrations_t.c.integration_id == integration_id
+                    )
                 ).fetchone()
 
             if not row:
@@ -629,10 +626,9 @@ class KafkaConsumerService:
                     f"Processing Debezium CDC event - querying database for integration {integration_id}",
                     extra={"trace_id": trace_id},
                 )
-                json_data = row.json_data
-                if json_data:
+                if row.json_data:
                     try:
-                        execution_config = json_module.loads(json_data)
+                        execution_config = json_module.loads(row.json_data)
                         logger.info(
                             f"Extracted execution config from database: {list(execution_config.keys())}",
                             extra={"trace_id": trace_id},
@@ -648,98 +644,35 @@ class KafkaConsumerService:
                         extra={"trace_id": trace_id},
                     )
 
-            # --- Step 3: Determine DAG ID ---
-            integration_type = row.integration_type
-            schedule_type = row.schedule_type
-            utc_sch_cron = row.utc_sch_cron
-            workspace_id = row.workspace_id
+            # --- Step 3: Determine DAG ID (shared) ---
+            dag_id = determine_dag_id(row.integration_type, row.schedule_type, row.utc_sch_cron)
 
-            workflow_name = integration_type.lower().replace("to", "_to_")
+            # --- Step 4: Build DAG run conf (shared) ---
+            conf = build_integration_conf(row)
+            conf["traceparent"] = traceparent
+            merge_json_data(conf, row.json_data, log=logger)
 
-            if schedule_type == "daily" and utc_sch_cron:
-                try:
-                    cron_parts = utc_sch_cron.split()
-                    if len(cron_parts) >= 2:
-                        hour = cron_parts[1].zfill(2)
-                        dag_id = f"{workflow_name}_daily_{hour}"
-                    else:
-                        dag_id = f"{workflow_name}_ondemand"
-                except (IndexError, ValueError):
-                    dag_id = f"{workflow_name}_ondemand"
-            else:
-                dag_id = f"{workflow_name}_ondemand"
-
-            # --- Step 4: Build DAG run conf ---
-            conf = {
-                "tenant_id": workspace_id,
-                "integration_id": integration_id,
-                "integration_type": integration_type,
-                "auth_id": row.auth_id,
-                "source_access_pt_id": row.source_access_pt_id,
-                "dest_access_pt_id": row.dest_access_pt_id,
-                "traceparent": traceparent,
-            }
-            # Merge json_data config (non-sensitive workflow config)
-            if row.json_data:
-                try:
-                    conf.update(json_module.loads(row.json_data))
-                except json_module.JSONDecodeError:
-                    pass
-
-            # Resolve credentials from workspace's Auth records
-            with engine.connect() as conn:
-                auth_rows = conn.execute(
-                    select(auths_t.c.auth_type, auths_t.c.json_data)
-                    .where(auths_t.c.workspace_id == workspace_id)
-                ).fetchall()
-            for auth_row in auth_rows:
-                if auth_row.json_data:
-                    try:
-                        conf.update(json_module.loads(auth_row.json_data))
-                    except json_module.JSONDecodeError:
-                        logger.warning(
-                            f"Failed to parse auth json_data for workspace {workspace_id}",
-                            extra={"trace_id": trace_id},
-                        )
-            logger.info(
-                f"Resolved {len(auth_rows)} auth record(s) for workspace {workspace_id}",
-                extra={"trace_id": trace_id},
-            )
+            # --- Step 5: Resolve auth credentials (shared) ---
+            auth_creds = resolve_auth_credentials_sync(engine, row.workspace_id, log=logger)
+            conf.update(auth_creds)
 
             # Override with execution_config (but preserve traceparent)
             if execution_config:
                 conf.update(execution_config)
             conf["traceparent"] = traceparent
 
-            # --- Step 5: Trigger Airflow DAG via REST API ---
-            import requests
-
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:17]
-            tenant_id = conf.get("tenant_id", "unknown")
-            custom_run_id = f"{tenant_id}_{dag_id}_manual_{timestamp}"
-
-            payload = {
-                "dag_run_id": custom_run_id,
-                "logical_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "conf": conf,
-            }
-
-            from shared_utils import get_airflow_auth_headers
-            headers = get_airflow_auth_headers(
-                settings.AIRFLOW_API_URL, settings.AIRFLOW_USERNAME, settings.AIRFLOW_PASSWORD
+            # --- Step 6: Trigger Airflow DAG via REST API (shared) ---
+            dag_run_id = trigger_airflow_dag(
+                settings.AIRFLOW_API_URL,
+                settings.AIRFLOW_USERNAME,
+                settings.AIRFLOW_PASSWORD,
+                dag_id,
+                conf,
+                trigger_source="manual",
+                log=logger,
             )
 
-            url = f"{settings.AIRFLOW_API_URL}/dags/{dag_id}/dagRuns"
-            response = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=10,
-            )
-            response.raise_for_status()
-            dag_run_id = response.json().get("dag_run_id")
-
-            # --- Step 6: Record IntegrationRun in DB ---
+            # --- Step 7: Record IntegrationRun in DB ---
             with engine.begin() as conn:
                 conn.execute(
                     integration_runs_t.insert().values(

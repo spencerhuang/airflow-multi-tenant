@@ -6,9 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
-import json
-import requests
-from shared_utils import get_airflow_auth_headers
+from shared_utils import (
+    build_integration_conf,
+    merge_json_data,
+    determine_dag_id,
+    trigger_airflow_dag,
+)
 
 from control_plane.app.models.integration import Integration
 from control_plane.app.models.integration_run import IntegrationRun
@@ -359,45 +362,43 @@ class IntegrationService:
             if not integration:
                 raise ValueError(f"Integration {integration_id} not found")
 
-            # Construct DAG ID based on workflow type and schedule
-            # For on-demand runs, use the _ondemand DAG
-            dag_id = self._get_dag_id_for_integration(integration)
+            # Determine DAG ID (shared pure function)
+            dag_id = determine_dag_id(
+                integration.integration_type,
+                integration.schedule_type,
+                integration.utc_sch_cron,
+            )
 
-            # Prepare configuration for DAG run
-            conf = {
-                "tenant_id": integration.workspace_id,
-                "integration_id": integration.integration_id,
-                "integration_type": integration.integration_type,
-                "auth_id": integration.auth_id,
-                "source_access_pt_id": integration.source_access_pt_id,
-                "dest_access_pt_id": integration.dest_access_pt_id,
-            }
+            # Build base conf (shared pure function)
+            conf = build_integration_conf(integration)
 
-            # Merge integration json_data (non-sensitive workflow config)
-            if integration.json_data:
-                try:
-                    json_config = json.loads(integration.json_data)
-                    conf.update(json_config)
-                except json.JSONDecodeError:
-                    pass
+            # Merge integration json_data (shared pure function)
+            merge_json_data(conf, integration.json_data)
 
-            # Resolve credentials from workspace's Auth records
+            # Resolve credentials from workspace's Auth records (async ORM)
             auth_result = await self.db.execute(
                 select(Auth).where(Auth.workspace_id == integration.workspace_id)
             )
             for auth in auth_result.scalars().all():
-                if auth.json_data:
-                    try:
-                        conf.update(json.loads(auth.json_data))
-                    except json.JSONDecodeError:
-                        pass
+                merge_json_data(conf, auth.json_data)
 
             # Override with execution_config if provided
             if execution_config:
                 conf.update(execution_config)
 
-            # Trigger DAG via Airflow REST API (synchronous)
-            dag_run_id = self._trigger_airflow_dag(dag_id, conf)
+            # Trigger DAG via shared utility (sync HTTP — run in executor
+            # to avoid blocking the async event loop)
+            loop = asyncio.get_event_loop()
+            dag_run_id = await loop.run_in_executor(
+                None,
+                lambda: trigger_airflow_dag(
+                    settings.AIRFLOW_API_URL,
+                    settings.AIRFLOW_USERNAME,
+                    settings.AIRFLOW_PASSWORD,
+                    dag_id,
+                    conf,
+                ),
+            )
 
             # Record integration run
             integration_run = IntegrationRun(
@@ -414,7 +415,7 @@ class IntegrationService:
                 "dag_id": dag_id,
                 "message": "DAG run triggered successfully",
             }
-        
+
         return await asyncio.wait_for(_execute(), timeout=DB_TIMEOUT)
 
     def _parse_cron_schedule(self, cron: str) -> tuple[Optional[int], Optional[int], Optional[int]]:
@@ -443,82 +444,3 @@ class IntegrationService:
         except (ValueError, IndexError):
             return (None, None, None)
 
-    def _get_dag_id_for_integration(self, integration: Integration) -> str:
-        """
-        Determine the DAG ID to use for an integration.
-
-        IMPORTANT: Uses UTC cron (utc_sch_cron) not user cron (usr_sch_cron).
-        Airflow DAGs are scheduled in UTC, so we must use the UTC hour.
-
-        For daily schedules, maps to hourly DAGs based on UTC hour.
-        For all other schedules (weekly, monthly, on_demand, cdc), uses _ondemand DAG.
-
-        Args:
-            integration: Integration instance
-
-        Returns:
-            DAG identifier
-        """
-        # Convert integration_type to snake_case for DAG naming
-        workflow_name = integration.integration_type.lower().replace("to", "_to_")
-
-        if integration.schedule_type == "daily" and integration.utc_sch_cron:
-            # Extract hour from UTC cron (format: "0 H * * *")
-            # This is the UTC hour when Airflow will run the DAG
-            try:
-                cron_parts = integration.utc_sch_cron.split()
-                if len(cron_parts) >= 2:
-                    hour = cron_parts[1].zfill(2)
-                    return f"{workflow_name}_daily_{hour}"
-            except (IndexError, ValueError):
-                pass
-
-        # Default to on-demand DAG (for weekly, monthly, on_demand, cdc)
-        return f"{workflow_name}_ondemand"
-
-    def _trigger_airflow_dag(self, dag_id: str, conf: Dict[str, Any]) -> str:
-        """
-        Trigger Airflow DAG via REST API with custom run ID.
-
-        Args:
-            dag_id: DAG identifier
-            conf: Configuration to pass to DAG run
-
-        Returns:
-            DAG run ID
-
-        Raises:
-            Exception: If API call fails
-        """
-        url = f"{settings.AIRFLOW_API_URL}/dags/{dag_id}/dagRuns"
-
-        # Generate custom run_id for easier debugging
-        # Format: <customer_id>_<dag_id>_manual_<timestamp>
-        # Extract customer/tenant from conf if available
-        tenant_id = conf.get("tenant_id", "unknown")
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")[:17]  # YYYYmmdd_HHMMSS
-        custom_run_id = f"{tenant_id}_{dag_id}_manual_{timestamp}"
-
-        payload = {
-            "dag_run_id": custom_run_id,
-            "logical_date": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "conf": conf,
-        }
-
-        try:
-            headers = get_airflow_auth_headers(
-                settings.AIRFLOW_API_URL, settings.AIRFLOW_USERNAME, settings.AIRFLOW_PASSWORD
-            )
-            response = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=10,
-            )
-            response.raise_for_status()
-
-            result = response.json()
-            return result.get("dag_run_id")
-
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"Failed to trigger Airflow DAG {dag_id}: {str(e)}")
