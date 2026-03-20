@@ -442,73 +442,65 @@ class TestS3ToMongoEndToEnd:
         print("STEP 4: Waiting for automatic CDC event and DAG trigger")
         print("="*60)
 
-        assert TestS3ToMongoEndToEnd.integration_id is not None, "Integration must be created first (run test_03_create_integration)"
+        assert TestS3ToMongoEndToEnd.integration_id is not None, (
+            "Integration must be created first (run test_03_create_integration)"
+        )
 
         print(f"\nIntegration ID: {TestS3ToMongoEndToEnd.integration_id}")
-        print(f"\nHow this works:")
-        print(f"  1. Integration was created in Step 3 (INSERT into MySQL)")
-        print(f"  2. Debezium automatically detected the INSERT")
-        print(f"  3. Debezium published CDC event to Kafka topic: {KAFKA_TOPIC}")
-        print(f"  4. Kafka consumer service picked up the CDC event")
-        print(f"  5. Consumer service is triggering Airflow DAG...")
+        print(f"\nPipeline: MySQL INSERT -> Debezium -> Kafka -> Consumer -> Airflow DAG")
 
-        # Store timestamp before waiting so we only look at DAG runs created after this point
-        from datetime import datetime as dt, timedelta, timezone as tz
-        trigger_time = dt.now(tz.utc)
-
-        # Wait for Kafka consumer to process the CDC event and trigger the DAG
-        print(f"\n  Waiting for DAG to be triggered (15 seconds)...")
-        time.sleep(15)  # Give consumer time to process CDC event and trigger DAG
-
-        # Check if DAG was triggered by the CDC event
+        trigger_time = datetime.now(timezone.utc)
         dag_id = "s3_to_mongo_ondemand"
-
-        print(f"\n  Checking Airflow for DAG runs created after {trigger_time.isoformat()}...")
-
+        headers = get_airflow_auth_headers()
         list_url = f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns"
 
-        try:
-            headers = get_airflow_auth_headers()
+        max_wait = 60  # seconds
+        interval = 5
+        elapsed = 0
+
+        print(f"\n  Polling for DAG run (up to {max_wait}s)...")
+
+        while elapsed < max_wait:
+            time.sleep(interval)
+            elapsed += interval
+
             response = requests.get(
                 list_url, headers=headers, timeout=10,
                 params={"limit": 100, "order_by": "-logical_date"},
             )
+            assert response.status_code == 200, (
+                f"Airflow API returned {response.status_code}: {response.text}"
+            )
 
-            if response.status_code == 200:
-                dag_runs = response.json().get("dag_runs", [])
+            dag_runs = response.json().get("dag_runs", [])
+            test_runs = [
+                run for run in dag_runs
+                if TEST_WORKSPACE_ID in run.get("dag_run_id", "")
+                and run.get("queued_at", "") > trigger_time.isoformat()
+            ]
 
-                # Find runs with our test workspace created after the trigger time
-                test_runs = [
-                    run for run in dag_runs
-                    if TEST_WORKSPACE_ID in run.get("dag_run_id", "")
-                    and run.get("queued_at", "") > trigger_time.isoformat()
-                ]
+            if test_runs:
+                latest_run = test_runs[0]
+                dag_run_id = latest_run.get("dag_run_id")
 
-                if test_runs:
-                    latest_run = test_runs[0]  # API returns newest first due to order_by=-logical_date
-                    dag_run_id = latest_run.get("dag_run_id")
+                print(f"  ✓ Found DAG run after {elapsed}s")
+                print(f"  ✓ DAG Run ID: {dag_run_id}")
+                print(f"  ✓ State: {latest_run.get('state')}")
 
-                    print(f"  ✓ Found DAG run triggered by CDC event")
-                    print(f"  ✓ DAG Run ID: {dag_run_id}")
-                    print(f"  ✓ State: {latest_run.get('state')}")
-                    print(f"  ✓ Logical Date: {latest_run.get('logical_date')}")
+                TestS3ToMongoEndToEnd.dag_run_id = dag_run_id
+                print(f"\n  Pipeline: MySQL INSERT -> Debezium -> Kafka -> Consumer -> Airflow DAG")
+                return
 
-                    # Store dag_run_id for next test
-                    TestS3ToMongoEndToEnd.dag_run_id = dag_run_id
-                    print(f"\n✅ Workflow automatically triggered via Debezium CDC!")
-                    print(f"\n🎉 End-to-end CDC pipeline is working:")
-                    print(f"   MySQL INSERT → Debezium → Kafka → Consumer → Airflow DAG")
-                else:
-                    pytest.skip("No DAG runs found. CDC event may not have been processed yet. Check:\n" +
-                               "  1. Debezium connector: curl http://localhost:8083/connectors/integration-cdc-connector/status\n" +
-                               "  2. Kafka consumer logs: docker-compose logs control-plane | grep 'Processing CDC event'\n" +
-                               "  3. Kafka topic: docker exec kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic cdc.integration.events --from-beginning --max-messages 10")
-            else:
-                pytest.skip(f"Could not verify DAG trigger (status {response.status_code})")
+            print(f"    No DAG run yet ({elapsed}s / {max_wait}s)...")
 
-        except Exception as e:
-            print(f"  ✗ Error checking DAG status: {e}")
-            pytest.skip(f"Could not check DAG status: {e}")
+        pytest.fail(
+            f"No DAG run found within {max_wait}s. CDC pipeline did not trigger.\n"
+            f"Debug:\n"
+            f"  1. Debezium connector: curl http://localhost:8083/connectors/integration-cdc-connector/status\n"
+            f"  2. Kafka consumer logs: docker-compose logs kafka-consumer | grep 'Processing CDC event'\n"
+            f"  3. Kafka topic: docker exec kafka kafka-console-consumer "
+            f"--bootstrap-server localhost:9092 --topic cdc.integration.events --from-beginning --max-messages 10"
+        )
 
     def test_05_verify_mongodb_data(self, mongo_client):
         """Step 5: Wait for DAG to complete and verify data in MongoDB."""
@@ -516,13 +508,12 @@ class TestS3ToMongoEndToEnd:
         print("STEP 5: Waiting for DAG completion and verifying MongoDB data")
         print("="*60)
 
-        # Check if we have a dag_run_id from test_04
         dag_run_id = getattr(TestS3ToMongoEndToEnd, 'dag_run_id', None)
-        if not dag_run_id:
-            pytest.skip("DAG was not triggered successfully in test_04")
+        assert dag_run_id is not None, "No dag_run_id — test_04 must pass first"
 
-        # Wait for DAG to complete
         dag_id = "s3_to_mongo_ondemand"
+        headers = get_airflow_auth_headers()
+        status_url = f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns/{dag_run_id}"
 
         print(f"  Waiting for DAG run {dag_run_id} to complete...")
 
@@ -532,38 +523,27 @@ class TestS3ToMongoEndToEnd:
         dag_state = None
 
         while elapsed < max_wait:
-            try:
-                # Check DAG run status
-                headers = get_airflow_auth_headers()
-                status_url = f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns/{dag_run_id}"
-                response = requests.get(status_url, headers=headers, timeout=10)
+            response = requests.get(status_url, headers=headers, timeout=10)
+            assert response.status_code == 200, (
+                f"Airflow API returned {response.status_code}: {response.text}"
+            )
 
-                if response.status_code == 200:
-                    dag_run_info = response.json()
-                    dag_state = dag_run_info.get("state")
+            dag_run_info = response.json()
+            dag_state = dag_run_info.get("state")
+            print(f"    DAG state: {dag_state} (elapsed: {elapsed}s)")
 
-                    print(f"    DAG state: {dag_state} (elapsed: {elapsed}s)")
-
-                    if dag_state == "success":
-                        print(f"  ✓ DAG completed successfully")
-                        break
-                    elif dag_state == "failed":
-                        print(f"  ✗ DAG failed")
-                        pytest.fail(f"DAG run failed. Check Airflow logs for details.")
-                    elif dag_state in ["running", "queued"]:
-                        # Still running, wait more
-                        pass
-                    else:
-                        print(f"  Unexpected DAG state: {dag_state}")
-
-            except Exception as e:
-                print(f"  Warning: Could not check DAG status: {e}")
+            if dag_state == "success":
+                print(f"  ✓ DAG completed successfully")
+                break
+            elif dag_state == "failed":
+                pytest.fail("DAG run failed. Check Airflow logs for details.")
 
             time.sleep(interval)
             elapsed += interval
 
-        if dag_state != "success":
-            pytest.skip(f"DAG did not complete within {max_wait} seconds (last state: {dag_state})")
+        assert dag_state == "success", (
+            f"DAG did not complete within {max_wait}s (last state: {dag_state})"
+        )
 
         # Now verify data in MongoDB
         print("\n  Verifying data in MongoDB...")

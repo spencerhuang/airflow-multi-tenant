@@ -23,7 +23,7 @@ testpaths = ["connectors/tests", "control_plane/tests", "airflow/tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
-addopts = "-v --tb=short --strict-markers --disable-warnings"
+addopts = "-v --tb=short --strict-markers --disable-warnings -m 'not integration'"
 markers = [
     "unit: Unit tests",
     "integration: Integration tests",

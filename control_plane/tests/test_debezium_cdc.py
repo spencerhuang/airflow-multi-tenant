@@ -201,8 +201,13 @@ def test_workspace(db_session):
         db_session.rollback()
 
 
+@pytest.mark.integration
 class TestDebeziumCDC:
-    """Test Debezium CDC captures database changes."""
+    """Test Debezium CDC captures database changes.
+
+    Requires running Docker services (MySQL, Kafka, Kafka Connect, Debezium).
+    Run explicitly with: pytest -m integration control_plane/tests/test_debezium_cdc.py -v -s
+    """
 
     def test_cdc_integration_created(self, db_session, kafka_consumer, test_workspace):
         """Test that creating an integration produces a CDC event."""
