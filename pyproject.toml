@@ -1,6 +1,6 @@
 [project]
 name = "airflow-multi-tenant"
-version = "0.1.1"
+version = "0.1.3"
 description = "A scalable Airflow-based architecture supporting multi-tenancy with hybrid scheduling, CDC, and reusable connectors"
 readme = "README.md"
 license = "MIT"

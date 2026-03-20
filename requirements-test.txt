@@ -38,7 +38,7 @@ pymongo==4.16.0
 kafka-python==2.3.0
 
 # Redis (transient credential vault)
-redis>=5.0.0
+redis==5.3.1
 
 # Authentication
 python-jose[cryptography]==3.5.0

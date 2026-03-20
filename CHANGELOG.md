@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-03-19
+
+### Security
+- Fernet-based encryption for customer credentials — New `secret_provider` module encrypts sensitive auth data at rest using `cryptography.fernet`, replacing plaintext credential passing (4dd98cc).
+- Customer auth credentials moved to Redis transient vault — Credentials are now stored in Redis scoped by `dag_run_id` with automatic TTL expiration, eliminating long-lived secrets in Airflow DAG conf (4dd98cc).
+
+### Added
+- `redis_client` shared utility — Connection pooling, TLS support, health checks, and automatic reconnection for Redis-backed credential storage.
+- `secret_provider` shared utility — Encrypt/decrypt credentials with Fernet keys, store and retrieve from Redis with configurable TTL.
+- `generate_fernet_key.py` helper script for key generation.
+- TLS toggle configuration for both Redis (`REDIS_TLS_ENABLED`) and Airflow (`AIRFLOW_TLS_VERIFY`) connections.
+- Docker entrypoint secrets script (`entrypoint-secrets.sh`) for secure key injection.
+- Redis service added to Docker Compose with persistence and optional TLS.
+- Unit tests for `redis_client` and `secret_provider` modules.
+
+### Changed
+- `s3_to_mongo_operators` refactored to retrieve credentials from Redis vault instead of DAG conf.
+- Control plane and Kafka consumer configs updated with Redis and Fernet settings.
+- All dependency versions pinned to exact versions for reproducible builds.
+- Shared packages (`shared_models`, `shared_utils`) bumped to 0.1.3.
+
+### Fixed
+- Missing `redis` dependency in test requirements that broke CI (36876bd).
+
 ## [0.1.2] - 2026-03-19
 
 ### Added
@@ -57,3 +81,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.1.0]: https://github.com/spencerhuang/airflow-multi-tenant/releases/tag/v0.1.0
 [0.1.1]: https://github.com/spencerhuang/airflow-multi-tenant/releases/tag/v0.1.1
 [0.1.2]: https://github.com/spencerhuang/airflow-multi-tenant/releases/tag/v0.1.2
+[0.1.3]: https://github.com/spencerhuang/airflow-multi-tenant/releases/tag/v0.1.3
