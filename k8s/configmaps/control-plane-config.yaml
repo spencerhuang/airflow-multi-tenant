@@ -242,6 +242,10 @@ data:
   MYSQL_DATABASE: "airflow_business"
   MYSQL_USER: "root"
 
+  # KEDA trigger connection strings (full DSN for ScaledObject queries)
+  POSTGRES_CONNECTION_STRING: "postgresql://airflow:airflow@postgres:5432/airflow"
+  MYSQL_CONNECTION_STRING: "root:root@tcp(mysql:3306)/airflow_business"
+
   # =============================================================================
   # Shared Service Endpoints
   # =============================================================================
