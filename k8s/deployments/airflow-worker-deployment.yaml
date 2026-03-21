@@ -31,9 +31,17 @@ spec:
             - celery
             - worker
           env:
-            # Load custom DAG configuration from ConfigMap
             - name: PYTHONPATH
               value: "/opt/airflow:/opt/airflow/plugins:/opt/airflow/config"
+            # Redis password from Secret — used by $(REDIS_PASSWORD) below
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: infra-secrets
+                  key: redis_password
+            # Celery broker via Redis Sentinel (auto-failover)
+            - name: AIRFLOW__CELERY__BROKER_URL
+              value: "sentinel://:$(REDIS_PASSWORD)@redis-sentinel:26379/0"
           envFrom:
             # Mount all variables from airflow-config ConfigMap
             - configMapRef:
@@ -115,7 +123,7 @@ spec:
   minReplicaCount: 2   # Always keep 2 workers minimum
   maxReplicaCount: 50  # Scale up to 50 workers maximum
   triggers:
-    # Scale based on PostgreSQL task queue depth
+    # Reactive: scale based on actual Airflow task queue depth
     - type: postgresql
       metadata:
         connectionFromEnv: POSTGRES_CONNECTION_STRING
@@ -123,47 +131,81 @@ spec:
           SELECT COUNT(*)
           FROM task_instance
           WHERE state IN ('queued', 'scheduled')
-        targetQueryValue: "10"  # Scale up when >10 tasks queued per worker
+        targetQueryValue: "10"  # 10 queued tasks per worker
+    # Proactive: scale based on scheduled integrations due in the next 24h.
+    # Excludes on_demand (triggered by CDC, not predictable).
+    # Each integration creates ~4 task instances, so 5 integrations ≈ 20 tasks.
+    # KEDA uses the MAX of all triggers, so workers ramp up before tasks are queued.
+    - type: mysql
+      metadata:
+        connectionFromEnv: MYSQL_CONNECTION_STRING
+        query: >
+          SELECT COUNT(*)
+          FROM integrations
+          WHERE usr_sch_status = 'active'
+            AND schedule_type != 'on_demand'
+            AND utc_next_run BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 24 HOUR)
+        targetQueryValue: "5"  # 1 worker per ~5 upcoming integrations
 
 ---
-# Horizontal Pod Autoscaler (HPA) - Alternative to KEDA
-# Use this if KEDA is not available.
+# PodDisruptionBudget for Worker Availability
+# Ensures at least 1 worker stays available during voluntary disruptions
+# (node drains, cluster upgrades, rollouts).
 
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
+apiVersion: policy/v1
+kind: PodDisruptionBudget
 metadata:
-  name: airflow-worker-hpa
+  name: airflow-worker-pdb
   namespace: airflow
 spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: airflow-worker
-  minReplicas: 2
-  maxReplicas: 50
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
-    - type: Resource
-      resource:
-        name: memory
-        target:
-          type: Utilization
-          averageUtilization: 80
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 300  # Wait 5 minutes before scaling down
-      policies:
-        - type: Percent
-          value: 50  # Scale down max 50% at a time
-          periodSeconds: 60
-    scaleUp:
-      stabilizationWindowSeconds: 0  # Scale up immediately
-      policies:
-        - type: Percent
-          value: 100  # Double capacity at a time
-          periodSeconds: 15
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: airflow
+      component: worker
+
+# ---
+# Horizontal Pod Autoscaler (HPA) - Alternative to KEDA
+# NOTE: Do NOT apply both KEDA ScaledObject and HPA for the same Deployment.
+#       Only one autoscaler should manage replica count at a time.
+#       KEDA is preferred because it scales on task queue depth (workload-aware).
+#       Use this HPA only if KEDA is not installed in the cluster.
+#
+# apiVersion: autoscaling/v2
+# kind: HorizontalPodAutoscaler
+# metadata:
+#   name: airflow-worker-hpa
+#   namespace: airflow
+# spec:
+#   scaleTargetRef:
+#     apiVersion: apps/v1
+#     kind: Deployment
+#     name: airflow-worker
+#   minReplicas: 2
+#   maxReplicas: 50
+#   metrics:
+#     - type: Resource
+#       resource:
+#         name: cpu
+#         target:
+#           type: Utilization
+#           averageUtilization: 70
+#     - type: Resource
+#       resource:
+#         name: memory
+#         target:
+#           type: Utilization
+#           averageUtilization: 80
+#   behavior:
+#     scaleDown:
+#       stabilizationWindowSeconds: 300
+#       policies:
+#         - type: Percent
+#           value: 50
+#           periodSeconds: 60
+#     scaleUp:
+#       stabilizationWindowSeconds: 0
+#       policies:
+#         - type: Percent
+#           value: 100
+#           periodSeconds: 15

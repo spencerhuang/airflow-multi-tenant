@@ -1,0 +1,145 @@
+---
+# Airflow Scheduler Deployment (HA)
+# Airflow 3.0 supports native HA scheduling via database row-level locking.
+# Multiple scheduler replicas coordinate without an external lock manager.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-scheduler
+  namespace: airflow
+  labels:
+    app: airflow
+    component: scheduler
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: airflow
+      component: scheduler
+  template:
+    metadata:
+      labels:
+        app: airflow
+        component: scheduler
+    spec:
+      containers:
+        - name: scheduler
+          image: airflow-multi-tenant:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - airflow
+            - scheduler
+          ports:
+            - name: health
+              containerPort: 8974
+              protocol: TCP
+          env:
+            - name: PYTHONPATH
+              value: "/opt/airflow:/opt/airflow/plugins:/opt/airflow/config"
+            # Redis password from Secret — used by $(REDIS_PASSWORD) below
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: infra-secrets
+                  key: redis_password
+            # Celery broker via Redis Sentinel (auto-failover)
+            - name: AIRFLOW__CELERY__BROKER_URL
+              value: "sentinel://:$(REDIS_PASSWORD)@redis-sentinel:26379/0"
+          envFrom:
+            - configMapRef:
+                name: airflow-config
+            - configMapRef:
+                name: airflow-env
+            - configMapRef:
+                name: shared-config
+            - secretRef:
+                name: airflow-secrets
+                optional: true
+          volumeMounts:
+            - name: dags
+              mountPath: /opt/airflow/dags
+            - name: plugins
+              mountPath: /opt/airflow/plugins
+            - name: config
+              mountPath: /opt/airflow/config
+            - name: logs
+              mountPath: /opt/airflow/logs
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      volumes:
+        - name: dags
+          persistentVolumeClaim:
+            claimName: airflow-dags
+        - name: plugins
+          persistentVolumeClaim:
+            claimName: airflow-plugins
+        - name: config
+          persistentVolumeClaim:
+            claimName: airflow-config-pvc
+        - name: logs
+          persistentVolumeClaim:
+            claimName: airflow-logs
+      restartPolicy: Always
+
+---
+# Service for scheduler health endpoint
+apiVersion: v1
+kind: Service
+metadata:
+  name: airflow-scheduler
+  namespace: airflow
+  labels:
+    app: airflow
+    component: scheduler
+spec:
+  type: ClusterIP
+  ports:
+    - name: health
+      port: 8974
+      targetPort: health
+      protocol: TCP
+  selector:
+    app: airflow
+    component: scheduler
+
+---
+# PodDisruptionBudget ensures at least 1 scheduler remains running
+# during voluntary disruptions (node drains, cluster upgrades).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: airflow-scheduler-pdb
+  namespace: airflow
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: airflow
+      component: scheduler

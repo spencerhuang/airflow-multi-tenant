@@ -1,0 +1,98 @@
+---
+# Airflow DAG Processor Deployment
+# New in Airflow 3.0: DAG parsing is handled by a dedicated dag-processor service,
+# separate from the scheduler. This decouples parsing from scheduling.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: airflow-dag-processor
+  namespace: airflow
+  labels:
+    app: airflow
+    component: dag-processor
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: airflow
+      component: dag-processor
+  template:
+    metadata:
+      labels:
+        app: airflow
+        component: dag-processor
+    spec:
+      containers:
+        - name: dag-processor
+          image: airflow-multi-tenant:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - airflow
+            - dag-processor
+          env:
+            - name: PYTHONPATH
+              value: "/opt/airflow:/opt/airflow/plugins:/opt/airflow/config"
+          envFrom:
+            - configMapRef:
+                name: airflow-config
+            - configMapRef:
+                name: airflow-env
+            - configMapRef:
+                name: shared-config
+            - secretRef:
+                name: airflow-secrets
+                optional: true
+          volumeMounts:
+            - name: dags
+              mountPath: /opt/airflow/dags
+            - name: plugins
+              mountPath: /opt/airflow/plugins
+            - name: config
+              mountPath: /opt/airflow/config
+            - name: logs
+              mountPath: /opt/airflow/logs
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "2Gi"
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "airflow jobs check --job-type DagProcessorJob --hostname $(hostname)"
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "airflow jobs check --job-type DagProcessorJob --hostname $(hostname)"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: dags
+          persistentVolumeClaim:
+            claimName: airflow-dags
+        - name: plugins
+          persistentVolumeClaim:
+            claimName: airflow-plugins
+        - name: config
+          persistentVolumeClaim:
+            claimName: airflow-config-pvc
+        - name: logs
+          persistentVolumeClaim:
+            claimName: airflow-logs
+      restartPolicy: Always

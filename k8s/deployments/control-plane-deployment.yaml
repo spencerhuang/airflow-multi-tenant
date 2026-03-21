@@ -26,6 +26,31 @@ spec:
         prometheus.io/port: "8000"
         prometheus.io/path: "/metrics"
     spec:
+      initContainers:
+        # Run Alembic migrations before starting the app.
+        # Runs once per rollout; all replicas wait for this to complete.
+        - name: migrate
+          image: control-plane:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "alembic", "upgrade", "head"]
+          workingDir: /app/control_plane
+          env:
+            - name: PYTHONPATH
+              value: "/app"
+          envFrom:
+            - configMapRef:
+                name: control-plane-config
+            - configMapRef:
+                name: shared-config
+            - secretRef:
+                name: control-plane-secrets
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
       containers:
         - name: control-plane
           image: control-plane:latest
@@ -94,6 +119,23 @@ spec:
   selector:
     app: control-plane
     component: api
+
+---
+# PodDisruptionBudget for Control Plane Availability
+# Ensures at least 2 replicas stay available during voluntary disruptions
+# (node drains, cluster upgrades, rollouts).
+
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: control-plane-pdb
+  namespace: airflow
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: control-plane
+      component: api
 
 ---
 # Control Plane HPA

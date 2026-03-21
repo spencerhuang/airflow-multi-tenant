@@ -13,6 +13,9 @@ This guide explains how to deploy the Multi-Tenant Airflow system to Kubernetes 
 - ✅ KEDA autoscaling for Airflow workers
 - ✅ HPA for control plane scaling
 - ✅ Production-ready health checks and resource limits
+- ✅ HA Scheduler with PodDisruptionBudget (Airflow 3.0 native multi-scheduler)
+- ✅ Separate DAG Processor deployment (Airflow 3.0 architecture)
+- ✅ Redis Sentinel HA (3 data nodes + 3 sentinels, automatic failover)
 
 ---
 
@@ -60,7 +63,9 @@ k8s/
 │   └── control-plane-config.yaml     # Control plane configuration
 ├── deployments/
 │   ├── airflow-worker-deployment.yaml
-│   ├── airflow-scheduler-deployment.yaml
+│   ├── airflow-scheduler-deployment.yaml    # HA (2 replicas + PDB)
+│   ├── airflow-dag-processor-deployment.yaml # Airflow 3.0 DAG parsing
+│   ├── redis-sentinel-statefulset.yaml      # Redis HA (3 data + 3 sentinel)
 │   └── control-plane-deployment.yaml
 ├── secrets/
 │   └── example-secrets.yaml          # Example (DO NOT use in production)
@@ -115,14 +120,20 @@ kubectl create secret generic control-plane-secrets \
 ### Step 4: Deploy Applications
 
 ```bash
+# Deploy Redis Sentinel HA (must be up before Airflow components)
+kubectl apply -f k8s/deployments/redis-sentinel-statefulset.yaml
+
 # Deploy Control Plane
 kubectl apply -f k8s/deployments/control-plane-deployment.yaml
 
+# Deploy Airflow Scheduler (HA - 2 replicas with PodDisruptionBudget)
+kubectl apply -f k8s/deployments/airflow-scheduler-deployment.yaml
+
+# Deploy Airflow DAG Processor (Airflow 3.0 - separate DAG parsing service)
+kubectl apply -f k8s/deployments/airflow-dag-processor-deployment.yaml
+
 # Deploy Airflow Workers
 kubectl apply -f k8s/deployments/airflow-worker-deployment.yaml
-
-# Deploy Airflow Scheduler (similar pattern)
-# kubectl apply -f k8s/deployments/airflow-scheduler-deployment.yaml
 ```
 
 ### Step 5: Verify Deployment
@@ -341,7 +352,14 @@ resources:
 
 ### KEDA for Airflow Workers
 
-KEDA (Kubernetes Event-Driven Autoscaling) scales workers based on task queue depth.
+KEDA (Kubernetes Event-Driven Autoscaling) scales workers using two triggers. KEDA scales to the **maximum** of all triggers, so workers ramp up proactively before tasks are even queued.
+
+| Trigger | Source | Query | Purpose |
+|---------|--------|-------|---------|
+| `postgresql` | Airflow metadata DB | `task_instance WHERE state IN ('queued','scheduled')` | **Reactive** — scales when tasks are already queued |
+| `mysql` | Business DB | `integrations WHERE schedule_type != 'on_demand' AND utc_next_run BETWEEN NOW() AND +24h` | **Proactive** — scales before tasks are created |
+
+The MySQL trigger counts scheduled integrations (daily/weekly/monthly) due in the next 24 hours, excluding on-demand integrations (CDC-triggered, unpredictable). Each integration creates ~4 task instances, so 5 integrations per worker is a good ratio.
 
 #### Prerequisites
 
@@ -367,16 +385,28 @@ spec:
   pollingInterval: 30   # Check every 30 seconds
   cooldownPeriod: 300   # Wait 5 min before scaling down
   triggers:
+    # Reactive: Airflow task queue depth
     - type: postgresql
       metadata:
         query: "SELECT COUNT(*) FROM task_instance WHERE state IN ('queued', 'scheduled')"
-        targetQueryValue: "10"  # 10 tasks per worker
+        targetQueryValue: "10"
+    # Proactive: scheduled integrations due in next 24h
+    - type: mysql
+      metadata:
+        query: >
+          SELECT COUNT(*) FROM integrations
+          WHERE usr_sch_status = 'active'
+            AND schedule_type != 'on_demand'
+            AND utc_next_run BETWEEN NOW() AND DATE_ADD(NOW(), INTERVAL 24 HOUR)
+        targetQueryValue: "5"
 ```
 
+> **⚠️ IMPORTANT — Raw SQL dependency:** The KEDA MySQL trigger queries `integrations` directly. If the table schema changes (column renames, table renames), the KEDA query in `k8s/deployments/airflow-worker-deployment.yaml` must be updated manually. See the [Schema Change Checklist](#schema-change-checklist) below.
+
 **Benefits:**
-- Scales to 0 workers when idle (cost savings)
-- Scales up to 50 workers during backfill (handles load)
-- Automatic scaling based on actual workload
+- Proactive scaling: workers spin up before dispatcher creates tasks
+- Reactive fallback: task queue depth handles CDC-triggered on-demand spikes
+- Cost savings: scales down after 5-minute cooldown
 
 ### HPA for Control Plane
 
@@ -397,6 +427,150 @@ spec:
         target:
           averageUtilization: 70
 ```
+
+---
+
+## 🔁 HA Scheduler (Airflow 3.0)
+
+Airflow 3.0 supports native High Availability scheduling. Multiple scheduler instances coordinate via database row-level locks — no external lock manager (Redis/ZooKeeper) required.
+
+### Architecture
+
+| Component | Replicas | Purpose |
+|-----------|----------|---------|
+| **Scheduler** | 2 (HA) | Picks up and schedules task instances. DB row-level locks prevent duplicate scheduling. |
+| **DAG Processor** | 1 | Parses DAG files and writes serialized DAGs to the database. Separated from scheduler in Airflow 3.0. |
+
+### Key Configuration
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK` | `True` | Exposes `/health` on port 8974 for k8s probes |
+| `AIRFLOW__CORE__EXECUTION_API_SERVER_URL` | `http://airflow-apiserver:8080/execution/` | Task SDK communication (Airflow 3.0) |
+| Scheduler replicas | 2 | HA via DB row-level locking |
+| PodDisruptionBudget | minAvailable: 1 | Protects during node drains / cluster upgrades |
+
+### Verify HA Scheduler
+
+```bash
+# Check scheduler pods are running (expect 2)
+kubectl get pods -n airflow -l component=scheduler
+
+# Check dag-processor is running (expect 1)
+kubectl get pods -n airflow -l component=dag-processor
+
+# Verify PDB is active
+kubectl get pdb -n airflow
+
+# Check scheduler health endpoint
+kubectl exec -n airflow deployment/airflow-scheduler -- curl -s http://localhost:8974/health
+```
+
+### Scaling Schedulers
+
+```bash
+# Scale schedulers manually (2-4 replicas recommended)
+kubectl scale deployment/airflow-scheduler --replicas=3 -n airflow
+```
+
+> **Note:** There is no HPA for schedulers because scheduling throughput is primarily DB-bound, not CPU-bound. Manual scaling to 2-4 replicas is the recommended approach.
+
+### Prerequisites
+
+- PVCs (`airflow-dags`, `airflow-plugins`, etc.) must support **ReadWriteMany** (RWX) access mode since scheduler, dag-processor, and worker pods mount them simultaneously.
+- An `airflow-apiserver` Service must exist in k8s (referenced by `EXECUTION_API_SERVER_URL`).
+
+---
+
+## 🔴 Redis Sentinel (HA)
+
+Redis is used as a transient credential vault for Airflow tasks. In production, a single Redis instance is a single point of failure — if it goes down mid-pipeline, all in-flight tasks that call `fetch_credentials()` will fail.
+
+### Architecture
+
+| Component | Replicas | Purpose |
+|-----------|----------|---------|
+| **Redis Data Nodes** | 3 (StatefulSet) | 1 master + 2 replicas. Ordinal 0 starts as master. |
+| **Redis Sentinel** | 3 (Deployment) | Monitors master, triggers automatic failover (quorum: 2). |
+
+### How Failover Works
+
+1. Sentinels monitor the master via `PING` every second
+2. If master is unreachable for 5 seconds (`down-after-milliseconds`), sentinels mark it as `SDOWN`
+3. When 2/3 sentinels agree (`quorum: 2`), master is marked `ODOWN`
+4. A sentinel is elected to perform failover within 10 seconds (`failover-timeout`)
+5. A replica is promoted to master; other replicas reconfigure automatically
+6. The Python `redis.sentinel.Sentinel` client auto-discovers the new master — no app restart needed
+
+### Key Configuration
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `REDIS_SENTINEL_HOSTS` | `redis-sentinel:26379` | Sentinel discovery endpoint |
+| `REDIS_SENTINEL_MASTER` | `mymaster` | Sentinel master name |
+| `REDIS_MAX_RETRIES` | `3` | Retry attempts for transient Redis failures |
+| `REDIS_RETRY_BACKOFF_BASE` | `0.5` | Base backoff in seconds (exponential: 0.5s, 1s, 2s) |
+
+### Error Differentiation
+
+The `fetch_credentials()` function now distinguishes between two failure modes:
+
+| Scenario | Exception | Airflow Behavior |
+|----------|-----------|-----------------|
+| Redis down (ConnectionError/TimeoutError) | `AirflowException` (after retries) | Task retries per retry config |
+| Key expired / never stored | `AirflowFailException` | Task marked FAILED immediately |
+
+### Verify Redis Sentinel
+
+```bash
+# Check Redis data pods (expect 3)
+kubectl get pods -n airflow -l component=data,app=redis
+
+# Check Sentinel pods (expect 3)
+kubectl get pods -n airflow -l component=sentinel
+
+# Query sentinel for master info
+kubectl exec -n airflow deployment/redis-sentinel -- redis-cli -p 26379 SENTINEL masters
+
+# Test failover (delete master pod, sentinel promotes replica)
+kubectl delete pod -n airflow redis-0
+kubectl exec -n airflow deployment/redis-sentinel -- redis-cli -p 26379 SENTINEL masters
+```
+
+### Celery Broker via Sentinel
+
+Airflow's CeleryExecutor uses Redis as the task broker. In k8s, the broker URL uses the `sentinel://` scheme so Kombu (Celery's transport layer) asks Sentinel for the current master and auto-follows failover.
+
+**Why not in the ConfigMap?** The broker URL contains the Redis password from `infra-secrets`. K8s ConfigMaps can't reference Secrets, so the URL is set per-Deployment using `$(REDIS_PASSWORD)` env var interpolation:
+
+```yaml
+# In airflow-worker-deployment.yaml and airflow-scheduler-deployment.yaml
+env:
+  - name: REDIS_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: infra-secrets
+        key: redis_password
+  - name: AIRFLOW__CELERY__BROKER_URL
+    value: "sentinel://:$(REDIS_PASSWORD)@redis-sentinel:26379/0"
+```
+
+The `master_name` is set in the ConfigMap (no secret needed):
+```yaml
+# In airflow-config.yaml (airflow-env ConfigMap)
+AIRFLOW__CELERY__BROKER_TRANSPORT_OPTIONS: '{"master_name": "mymaster"}'
+```
+
+### Docker vs K8s
+
+| Concern | Docker (dev) | K8s (production) |
+|---------|-------------|------------------|
+| **Executor** | `LocalExecutor` — no Celery, no broker | `CeleryExecutor` — broker required |
+| **Redis topology** | Single `redis:7-alpine` | 3 data nodes + 3 sentinels |
+| **Celery broker** | N/A | `sentinel://:password@redis-sentinel:26379/0` |
+| **Credential vault** | `REDIS_HOST`/`REDIS_PORT` → plain TCP | `REDIS_SENTINEL_HOSTS` → Sentinel mode |
+
+No code changes needed between environments — Airflow reads its executor config from env vars, and the Python Redis client auto-detects Sentinel mode.
 
 ---
 
@@ -724,6 +898,27 @@ kubectl describe scaledobject airflow-worker-scaler -n airflow
 5. **Don't disable health checks**
    - Kubernetes can't detect failures
    - Bad pods receive traffic
+
+---
+
+## ⚠️ Schema Change Checklist {#schema-change-checklist}
+
+When modifying `packages/shared_models/shared_models/tables.py`, some downstream files contain **raw SQL** that references table/column names directly. These must be updated manually — they are not covered by Alembic migrations.
+
+| File | Raw SQL Location | Tables/Columns Referenced |
+|------|-----------------|--------------------------|
+| `k8s/deployments/airflow-worker-deployment.yaml` | KEDA MySQL trigger | `integrations.usr_sch_status`, `integrations.schedule_type`, `integrations.utc_next_run` |
+| `k8s/deployments/airflow-worker-deployment.yaml` | KEDA PostgreSQL trigger | `task_instance.state` (Airflow internal — rarely changes) |
+
+### Steps After Schema Change
+
+1. **Generate Alembic migration** as usual (`alembic revision --autogenerate`)
+2. **Search for raw SQL references** to any renamed/removed columns:
+   ```bash
+   grep -r 'integrations\|task_instance' k8s/deployments/ --include='*.yaml'
+   ```
+3. **Update KEDA queries** in `airflow-worker-deployment.yaml` if affected
+4. **Apply in order**: ConfigMaps → Alembic migration (init container) → KEDA ScaledObject
 
 ---
 

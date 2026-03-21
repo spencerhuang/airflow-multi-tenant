@@ -9,10 +9,12 @@ This keeps each integration isolated in its own DAG run with proper
 IntegrationRun tracking.
 """
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from airflow.sdk import BaseOperator
-from sqlalchemy import select
+from croniter import croniter
+from sqlalchemy import select, update
 
 from config.airflow_config import get_control_plane_config
 from shared_models.tables import integrations as integrations_table
@@ -81,6 +83,7 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
                 try:
                     conf = self._build_conf(engine, row)
                     dag_run_id = self._trigger_ondemand_dag(conf, config)
+                    self._advance_next_run(engine, row)
                     # IntegrationRun record is created by PrepareS3ToMongoTask
                     # inside the triggered ondemand DAG (single source of truth).
                     results.append({
@@ -169,6 +172,34 @@ class DispatchScheduledIntegrationsTask(BaseOperator):
         conf.update(auth_creds)
 
         return conf
+
+    def _advance_next_run(self, engine, row) -> None:
+        """Advance utc_next_run to the next cron occurrence after now.
+
+        Uses croniter to compute the exact next UTC time from utc_sch_cron.
+        Failure is logged but does not break the dispatch — the integration
+        was already triggered successfully.
+        """
+        if not row.utc_sch_cron:
+            return
+        try:
+            now_utc = datetime.now(timezone.utc)
+            next_run = croniter(row.utc_sch_cron, now_utc).get_next(datetime)
+            t = integrations_table
+            with engine.connect() as conn:
+                conn.execute(
+                    update(t)
+                    .where(t.c.integration_id == row.integration_id)
+                    .values(utc_next_run=next_run)
+                )
+                conn.commit()
+            self.log.info(
+                f"Advanced utc_next_run for integration {row.integration_id} → {next_run.isoformat()}"
+            )
+        except Exception as e:
+            self.log.warning(
+                f"Failed to advance utc_next_run for integration {row.integration_id}: {e}"
+            )
 
     def _trigger_ondemand_dag(self, conf: Dict[str, Any], config) -> str:
         """Trigger the ondemand DAG using shared utility."""

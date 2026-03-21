@@ -977,9 +977,8 @@ class TestDispatchScheduledIntegrationsTask:
         assert payload["conf"]["integration_id"] == 1
         assert payload["conf"]["s3_access_key"] == "ak"
 
-        # Verify: only 2 DB calls (find integrations + find auths)
-        # No integration_run creation — that's now PrepareTask's job
-        assert mock_conn.execute.call_count == 2
+        # Verify: 3 DB calls (find integrations + find auths + advance utc_next_run)
+        assert mock_conn.execute.call_count == 3
 
     @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
@@ -1156,6 +1155,96 @@ class TestDispatchScheduledIntegrationsTask:
 
         assert len(matched) == 1
         assert matched[0].integration_id == 1
+
+
+    @patch("operators.dispatch_operators.croniter")
+    @patch("operators.dispatch_operators.create_control_plane_engine")
+    @patch("operators.dispatch_operators.get_control_plane_config")
+    def test_dispatch_advances_utc_next_run(self, mock_config, mock_engine_cls, mock_croniter):
+        """Verify _advance_next_run computes next cron occurrence and UPDATEs the DB."""
+        from datetime import datetime, timezone
+
+        config = Mock()
+        config.control_plane_db_url = "mysql+pymysql://test"
+        mock_config.return_value = config
+
+        future_dt = datetime(2026, 3, 22, 2, 0, tzinfo=timezone.utc)
+        mock_croniter_instance = MagicMock()
+        mock_croniter_instance.get_next.return_value = future_dt
+        mock_croniter.return_value = mock_croniter_instance
+
+        row = self._make_integration_row(utc_sch_cron="0 2 * * *")
+
+        mock_conn = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine_cls.return_value = mock_engine
+        mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
+
+        operator = DispatchScheduledIntegrationsTask(task_id="test_advance")
+        operator._advance_next_run(mock_engine, row)
+
+        # Verify croniter was called with the cron expression
+        mock_croniter.assert_called_once()
+        assert mock_croniter.call_args[0][0] == "0 2 * * *"
+
+        # Verify UPDATE was executed
+        mock_conn.execute.assert_called_once()
+        mock_conn.commit.assert_called_once()
+
+    @patch("shared_utils.dag_trigger.get_airflow_auth_headers")
+    @patch("shared_utils.dag_trigger.requests.post")
+    @patch("operators.dispatch_operators.create_control_plane_engine")
+    @patch("operators.dispatch_operators.get_control_plane_config")
+    def test_dispatch_advance_failure_does_not_break_dispatch(
+        self, mock_config, mock_engine_cls, mock_post, mock_auth_headers
+    ):
+        """If _advance_next_run fails, the dispatch still succeeds."""
+        config = Mock()
+        config.control_plane_db_url = "mysql+pymysql://test"
+        config.airflow_internal_api_url = "http://airflow:8080/api/v2"
+        config.airflow_username = "airflow"
+        config.airflow_password = "airflow"
+        mock_config.return_value = config
+
+        integration_row = self._make_integration_row()
+        auth_row = self._make_auth_row()
+
+        mock_conn = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine_cls.return_value = mock_engine
+
+        call_count = {"n": 0}
+        def execute_side_effect(query, *args, **kwargs):
+            call_count["n"] += 1
+            result = MagicMock()
+            if call_count["n"] == 1:
+                result.fetchall.return_value = [integration_row]
+            elif call_count["n"] == 2:
+                result.fetchall.return_value = [auth_row]
+            elif call_count["n"] == 3:
+                # Simulate DB failure on advance_next_run UPDATE
+                raise Exception("DB write failed")
+            return result
+
+        mock_conn.execute.side_effect = execute_side_effect
+        mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
+
+        mock_auth_headers.return_value = {"Authorization": "Bearer token"}
+        mock_post.return_value = Mock(status_code=200)
+        mock_post.return_value.json.return_value = {"dag_run_id": "test_run_id"}
+        mock_post.return_value.raise_for_status = Mock()
+
+        operator = DispatchScheduledIntegrationsTask(
+            task_id="dispatch", schedule_hour=2, integration_type="s3_to_mongo"
+        )
+        result = operator.execute({})
+
+        # Dispatch still succeeds despite advance failure
+        assert result["dispatched"] == 1
+        assert result["errors"] == 0
+        assert result["results"][0]["status"] == "triggered"
 
 
 if __name__ == "__main__":

@@ -1,0 +1,283 @@
+---
+# Redis Sentinel HA Deployment
+# Provides high-availability Redis for the transient credential vault.
+# Architecture: 3 Redis data nodes (1 master + 2 replicas) + 3 Sentinel instances.
+# Failover is automatic: Sentinels detect master failure and promote a replica.
+
+# ConfigMap for Redis and Sentinel configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: airflow
+  labels:
+    app: redis
+    component: config
+data:
+  redis.conf: |
+    bind 0.0.0.0
+    port 6379
+    # Password is injected via environment variable in the startup command
+    appendonly yes
+    appendfsync everysec
+    maxmemory 256mb
+    maxmemory-policy allkeys-lru
+    # Replication tuning
+    repl-diskless-sync yes
+    repl-diskless-sync-delay 5
+
+  sentinel.conf: |
+    port 26379
+    # SENTINEL_MASTER_HOST and REDIS_PASSWORD are substituted by the init container
+    sentinel monitor mymaster SENTINEL_MASTER_HOST 6379 2
+    sentinel auth-pass mymaster SENTINEL_PASSWORD
+    sentinel down-after-milliseconds mymaster 5000
+    sentinel failover-timeout mymaster 10000
+    sentinel parallel-syncs mymaster 1
+
+  start-redis.sh: |
+    #!/bin/sh
+    set -e
+    # Determine role from pod ordinal index
+    ORDINAL=$(echo "$HOSTNAME" | grep -o '[0-9]*$')
+    cp /config/redis.conf /data/redis.conf
+    echo "requirepass $REDIS_PASSWORD" >> /data/redis.conf
+    echo "masterauth $REDIS_PASSWORD" >> /data/redis.conf
+    if [ "$ORDINAL" != "0" ]; then
+      echo "replicaof redis-0.redis-headless 6379" >> /data/redis.conf
+    fi
+    exec redis-server /data/redis.conf
+
+  start-sentinel.sh: |
+    #!/bin/sh
+    set -e
+    cp /config/sentinel.conf /data/sentinel.conf
+    sed -i "s/SENTINEL_MASTER_HOST/redis-0.redis-headless/g" /data/sentinel.conf
+    sed -i "s/SENTINEL_PASSWORD/$REDIS_PASSWORD/g" /data/sentinel.conf
+    exec redis-sentinel /data/sentinel.conf
+
+---
+# Headless Service for StatefulSet DNS (redis-0.redis-headless, etc.)
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-headless
+  namespace: airflow
+  labels:
+    app: redis
+spec:
+  ports:
+    - name: redis
+      port: 6379
+      protocol: TCP
+  clusterIP: None
+  selector:
+    app: redis
+    component: data
+
+---
+# ClusterIP Service for Redis master (backward compat for Celery broker URL)
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: airflow
+  labels:
+    app: redis
+spec:
+  type: ClusterIP
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+      protocol: TCP
+  selector:
+    app: redis
+    component: data
+
+---
+# ClusterIP Service for Sentinel discovery
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sentinel
+  namespace: airflow
+  labels:
+    app: redis-sentinel
+spec:
+  type: ClusterIP
+  ports:
+    - name: sentinel
+      port: 26379
+      targetPort: 26379
+      protocol: TCP
+  selector:
+    app: redis-sentinel
+    component: sentinel
+
+---
+# Redis Data Nodes (StatefulSet: 3 replicas, ordinal 0 = master)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: airflow
+  labels:
+    app: redis
+    component: data
+  annotations:
+    description: "Redis HA data nodes (1 master + 2 replicas)"
+spec:
+  serviceName: redis-headless
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis
+      component: data
+  template:
+    metadata:
+      labels:
+        app: redis
+        component: data
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          command: ["sh", "/config/start-redis.sh"]
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: infra-secrets
+                  key: redis_password
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+            - name: redis-config
+              mountPath: /config
+              readOnly: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "250m"
+              memory: "256Mi"
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "redis-cli -a $REDIS_PASSWORD ping | grep -q PONG"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "redis-cli -a $REDIS_PASSWORD ping | grep -q PONG"
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+        labels:
+          app: redis
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+
+---
+# Redis Sentinel Instances (Deployment: 3 stateless replicas)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-sentinel
+  namespace: airflow
+  labels:
+    app: redis-sentinel
+    component: sentinel
+  annotations:
+    description: "Redis Sentinel instances for automatic failover"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis-sentinel
+      component: sentinel
+  template:
+    metadata:
+      labels:
+        app: redis-sentinel
+        component: sentinel
+    spec:
+      containers:
+        - name: sentinel
+          image: redis:7-alpine
+          command: ["sh", "/config/start-sentinel.sh"]
+          ports:
+            - name: sentinel
+              containerPort: 26379
+              protocol: TCP
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: infra-secrets
+                  key: redis_password
+          volumeMounts:
+            - name: redis-config
+              mountPath: /config
+              readOnly: true
+            - name: sentinel-data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "redis-cli -p 26379 ping | grep -q PONG"
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - "redis-cli -p 26379 ping | grep -q PONG"
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: redis-config
+          configMap:
+            name: redis-config
+            defaultMode: 0755
+        - name: sentinel-data
+          emptyDir: {}
