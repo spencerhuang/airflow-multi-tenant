@@ -140,7 +140,16 @@ def _build_trigger_run_id(tenant_id: str, integration_type: str) -> str:
 
 
 def _advance_next_run(engine, row) -> None:
-    """Advance utc_next_run to the next cron occurrence after now.
+    """Advance utc_next_run to the next cron occurrence.
+
+    Backfill policy differs by schedule type:
+    - **daily**: Advance from ``now`` — skips missed runs. Daily jobs are
+      high-frequency; replaying 7 missed dailies after a week of downtime
+      would flood the system with stale data.
+    - **weekly / monthly**: Advance from the current ``utc_next_run`` — one
+      interval at a time. If the system was down for 3 weeks, the weekly
+      integration is dispatched once per controller cycle (hourly) until
+      all missed weeks are caught up.
 
     Uses croniter to compute the exact next UTC time from utc_sch_cron.
     Failure is logged but does not prevent the integration from being
@@ -150,7 +159,14 @@ def _advance_next_run(engine, row) -> None:
         return
     try:
         now_utc = datetime.now(timezone.utc)
-        next_run = croniter(row.utc_sch_cron, now_utc).get_next(datetime)
+        # Daily: jump to next future occurrence (skip missed runs).
+        # Weekly/monthly: step forward from current utc_next_run so each
+        # missed occurrence is dispatched on the next controller cycle.
+        if row.schedule_type in ("weekly", "monthly") and row.utc_next_run:
+            base = row.utc_next_run
+        else:
+            base = now_utc
+        next_run = croniter(row.utc_sch_cron, base).get_next(datetime)
         t = integrations_table
         with engine.connect() as conn:
             conn.execute(
@@ -160,7 +176,9 @@ def _advance_next_run(engine, row) -> None:
             )
             conn.commit()
         logger.info(
-            f"Advanced utc_next_run for integration {row.integration_id} → {next_run.isoformat()}"
+            f"Advanced utc_next_run for integration {row.integration_id} "
+            f"({row.schedule_type}, base={'utc_next_run' if base != now_utc else 'now'}) "
+            f"→ {next_run.isoformat()}"
         )
     except Exception as e:
         logger.warning(

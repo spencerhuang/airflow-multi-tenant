@@ -1026,6 +1026,8 @@ Phase B: TriggerDagRunOperator.partial(...).expand_kwargs(due)
 
 2. **`utc_next_run` advanced in Phase A (before trigger)**: Phase B (`TriggerDagRunOperator`) is fire-and-forget with no callback. Advancing in Phase A before triggering means a Phase B failure could theoretically skip a run, but `catchup=False` + `utc_next_run <= now` means past-due integrations are naturally picked up on the next hourly run.
 
+3. **Per-schedule backfill policy**: Daily integrations advance `utc_next_run` from `now` (skip missed runs — replaying a week of stale dailies would flood the system). Weekly and monthly advance from the current `utc_next_run` (backfill one occurrence per controller cycle until caught up). This means after 3 weeks of downtime, a weekly integration dispatches 3 runs across 3 consecutive hourly cycles.
+
 3. **Native `TriggerDagRunOperator` over REST API**: Eliminates the need for `AIRFLOW_INTERNAL_API_URL` / username / password inside the dispatcher. More reliable (Airflow internal mechanism vs HTTP).
 
 4. **`determine_dag_id()` simplified**: All schedule types now resolve to `{workflow_name}_ondemand`. The per-hour DAG IDs (`_daily_02`, `_daily_14`, etc.) no longer exist.

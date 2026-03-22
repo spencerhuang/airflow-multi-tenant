@@ -39,7 +39,8 @@ Each integration gets its own isolated DAG run on `s3_to_mongo_ondemand`, reusin
 - **`utc_next_run <= now`** — universal "is due" check handles daily, weekly, monthly uniformly
 - **`wait_for_completion=False`** — controller fires and forgets, no "hanging parent" risk
 - **Native TriggerDagRunOperator** — no REST API self-triggering needed
-- **`catchup=False`** — past-due integrations caught naturally on next run
+- **`catchup=False`** — the controller itself doesn't backfill, but past-due integrations are caught via `utc_next_run <= now`
+- **Per-schedule backfill policy** — daily skips missed runs; weekly/monthly backfill one occurrence per controller cycle
 
 ## How It Works
 
@@ -87,8 +88,27 @@ WHERE usr_sch_status = 'active'
 **Per integration:**
 1. **Build conf** — merges integration fields, `json_data`, and auth credentials (same pattern as control plane API and Kafka consumer)
 2. **Generate trigger_run_id** — format: `{tenant_id}_s3_to_mongo_ondemand_scheduled_{timestamp}`
-3. **Advance utc_next_run** — uses croniter to compute next cron occurrence
+3. **Advance utc_next_run** — schedule-type-aware backfill policy (see below)
 4. **Error isolation** — if one integration fails, log and skip; others still dispatched
+
+### Backfill Policy
+
+`_advance_next_run` uses different base times depending on schedule type:
+
+| Schedule Type | Base for croniter | Behavior After Downtime |
+|---|---|---|
+| **daily** | `now` | Skips missed runs — jumps to next future occurrence. Daily jobs are high-frequency; replaying a week of missed dailies would flood the system with stale data. |
+| **weekly** | Current `utc_next_run` | Backfills one occurrence per controller cycle. If 3 weeks were missed, 3 runs are dispatched across 3 consecutive hourly cycles. |
+| **monthly** | Current `utc_next_run` | Same as weekly — backfills one month at a time until caught up. |
+
+**Example**: System was down for 3 weeks. A weekly integration had `utc_next_run = March 1`.
+
+| Controller Cycle | `utc_next_run` Before | Action | `utc_next_run` After |
+|---|---|---|---|
+| Cycle 1 | March 1 (past) | Dispatch run, advance from March 1 | March 8 |
+| Cycle 2 | March 8 (past) | Dispatch run, advance from March 8 | March 15 |
+| Cycle 3 | March 15 (past) | Dispatch run, advance from March 15 | March 22 |
+| Cycle 4 | March 22 (future) | Not due — skipped | March 22 |
 
 **Returns** `list[dict]` where each dict has `{"conf": {...}, "trigger_run_id": "..."}` — suitable for `TriggerDagRunOperator.expand_kwargs()`.
 

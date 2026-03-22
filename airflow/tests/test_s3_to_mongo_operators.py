@@ -1062,8 +1062,8 @@ class TestFindAndPrepareDueIntegrations:
     @patch("operators.dispatch_operators.croniter")
     @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
-    def test_advances_utc_next_run(self, mock_config, mock_engine_cls, mock_croniter):
-        """Verify utc_next_run is advanced via croniter."""
+    def test_advances_utc_next_run_daily_from_now(self, mock_config, mock_engine_cls, mock_croniter):
+        """Daily integrations advance utc_next_run from now (skip missed runs)."""
         from datetime import datetime, timezone
         from operators.dispatch_operators import _advance_next_run
 
@@ -1073,6 +1073,8 @@ class TestFindAndPrepareDueIntegrations:
         mock_croniter.return_value = mock_croniter_instance
 
         row = self._make_integration_row(utc_sch_cron="0 2 * * *")
+        row.schedule_type = "daily"
+        row.utc_next_run = datetime(2026, 3, 15, 2, 0, tzinfo=timezone.utc)  # 1 week ago
 
         mock_conn = MagicMock()
         mock_engine = MagicMock()
@@ -1082,9 +1084,72 @@ class TestFindAndPrepareDueIntegrations:
         _advance_next_run(mock_engine, row)
 
         mock_croniter.assert_called_once()
-        assert mock_croniter.call_args[0][0] == "0 2 * * *"
+        # Daily uses now as base, NOT utc_next_run
+        base_arg = mock_croniter.call_args[0][1]
+        assert base_arg != row.utc_next_run  # Should be ~now, not the old utc_next_run
         mock_conn.execute.assert_called_once()
         mock_conn.commit.assert_called_once()
+
+    @patch("operators.dispatch_operators.croniter")
+    @patch("operators.dispatch_operators.create_control_plane_engine")
+    @patch("operators.dispatch_operators.get_control_plane_config")
+    def test_advances_utc_next_run_weekly_from_previous(self, mock_config, mock_engine_cls, mock_croniter):
+        """Weekly integrations advance utc_next_run from current value (backfill)."""
+        from datetime import datetime, timezone
+        from operators.dispatch_operators import _advance_next_run
+
+        past_next_run = datetime(2026, 3, 8, 2, 0, tzinfo=timezone.utc)  # 2 weeks ago
+        next_week = datetime(2026, 3, 15, 2, 0, tzinfo=timezone.utc)
+        mock_croniter_instance = MagicMock()
+        mock_croniter_instance.get_next.return_value = next_week
+        mock_croniter.return_value = mock_croniter_instance
+
+        row = self._make_integration_row(utc_sch_cron="0 2 * * 1")
+        row.schedule_type = "weekly"
+        row.utc_next_run = past_next_run
+
+        mock_conn = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
+
+        _advance_next_run(mock_engine, row)
+
+        mock_croniter.assert_called_once()
+        # Weekly uses utc_next_run as base for backfill
+        base_arg = mock_croniter.call_args[0][1]
+        assert base_arg == past_next_run
+        mock_conn.execute.assert_called_once()
+
+    @patch("operators.dispatch_operators.croniter")
+    @patch("operators.dispatch_operators.create_control_plane_engine")
+    @patch("operators.dispatch_operators.get_control_plane_config")
+    def test_advances_utc_next_run_monthly_from_previous(self, mock_config, mock_engine_cls, mock_croniter):
+        """Monthly integrations advance utc_next_run from current value (backfill)."""
+        from datetime import datetime, timezone
+        from operators.dispatch_operators import _advance_next_run
+
+        past_next_run = datetime(2026, 1, 15, 2, 0, tzinfo=timezone.utc)  # 2 months ago
+        next_month = datetime(2026, 2, 15, 2, 0, tzinfo=timezone.utc)
+        mock_croniter_instance = MagicMock()
+        mock_croniter_instance.get_next.return_value = next_month
+        mock_croniter.return_value = mock_croniter_instance
+
+        row = self._make_integration_row(utc_sch_cron="0 2 15 * *")
+        row.schedule_type = "monthly"
+        row.utc_next_run = past_next_run
+
+        mock_conn = MagicMock()
+        mock_engine = MagicMock()
+        mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
+        mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
+
+        _advance_next_run(mock_engine, row)
+
+        mock_croniter.assert_called_once()
+        # Monthly uses utc_next_run as base for backfill
+        base_arg = mock_croniter.call_args[0][1]
+        assert base_arg == past_next_run
 
     @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
