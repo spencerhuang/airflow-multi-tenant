@@ -82,7 +82,7 @@ DAG_FILE_PATH = os.path.join(
 # ---------------------------------------------------------------------------
 DAG_FILE_CONTENT = f'''\
 """Temporary controller DAG for cron scheduling e2e test. Auto-generated."""
-from datetime import datetime
+from datetime import datetime, timezone
 from airflow.sdk import DAG
 from airflow.sdk.definitions.decorators import task
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
@@ -91,7 +91,7 @@ with DAG(
     dag_id="{CONTROLLER_DAG_ID}",
     description="Temporary controller DAG for cron scheduling e2e test",
     schedule="* * * * *",
-    start_date=datetime(2025, 1, 1),
+    start_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
     catchup=False,
     max_active_runs=1,
     tags=["test", "e2e", "cron", "controller"],

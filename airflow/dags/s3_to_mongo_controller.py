@@ -15,7 +15,7 @@ Configuration:
     See config.airflow_config for available environment variables.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from airflow.sdk import DAG
 from airflow.sdk.definitions.decorators import task
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
@@ -34,6 +34,7 @@ with DAG(
         dag_config.start_date_year,
         dag_config.start_date_month,
         dag_config.start_date_day,
+        tzinfo=timezone.utc,
     ),
     catchup=False,
     tags=["s3", "mongodb", "controller", "dispatcher"],

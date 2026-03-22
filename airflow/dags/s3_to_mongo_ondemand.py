@@ -13,7 +13,7 @@ Configuration:
     See config.airflow_config for available environment variables.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from airflow.sdk import DAG
 from airflow.utils.trigger_rule import TriggerRule
 
@@ -42,6 +42,7 @@ with DAG(
         dag_config.start_date_year,
         dag_config.start_date_month,
         dag_config.start_date_day,
+        tzinfo=timezone.utc,
     ),
     catchup=dag_config.catchup,
     tags=["s3", "mongodb", "ondemand", "etl"],
