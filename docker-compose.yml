@@ -18,6 +18,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__API_AUTH__JWT_SECRET: '${AIRFLOW_JWT_SECRET:-airflow-jwt-secret-change-in-production}'
     # Airflow 3: Execution API URL required for task SDK communication
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    # Airflow 3: Bundle refresh interval (seconds) for dag-processor to detect new DAG files
+    AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: '30'
     PYTHONPATH: /opt/airflow
     _PIP_ADDITIONAL_REQUIREMENTS: 'boto3 pymongo pymysql apache-airflow-providers-fab redis>=5.0.0'
     CONTROL_PLANE_DB_URL: 'mysql+pymysql://${MYSQL_USER:-control_plane}:${MYSQL_PASSWORD:-control_plane}@mysql:3306/${MYSQL_DATABASE:-control_plane}'

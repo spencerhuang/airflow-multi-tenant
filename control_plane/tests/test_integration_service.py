@@ -216,14 +216,18 @@ class TestIntegrationService:
         mock_db.delete.assert_not_called()
 
     def test_determine_dag_id_daily(self, service, sample_integration):
-        """Test determining DAG ID for daily integration via shared function."""
+        """Test determining DAG ID for daily integration via shared function.
+
+        All schedule types now return _ondemand — the Controller DAG
+        handles scheduled dispatching via DTM.
+        """
         from shared_utils import determine_dag_id
         dag_id = determine_dag_id(
             sample_integration.integration_type,
             sample_integration.schedule_type,
             sample_integration.utc_sch_cron,
         )
-        assert dag_id == "s3_to_mongo_daily_02"
+        assert dag_id == "s3_to_mongo_ondemand"
 
     def test_determine_dag_id_ondemand(self, service, sample_integration):
         """Test determining DAG ID for on-demand integration."""
@@ -304,7 +308,7 @@ class TestIntegrationService:
 
         assert result["integration_id"] == 1
         assert result["dag_run_id"] == "manual__2024-01-01T00:00:00"
-        assert result["dag_id"] == "s3_to_mongo_daily_02"
+        assert result["dag_id"] == "s3_to_mongo_ondemand"
         assert result["message"] == "DAG run triggered successfully"
 
         # Verify IntegrationRun was created

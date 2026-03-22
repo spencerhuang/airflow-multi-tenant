@@ -80,7 +80,7 @@ from operators.s3_to_mongo_operators import (
     ExecuteS3ToMongoTask,
     CleanUpS3ToMongoTask,
 )
-from operators.dispatch_operators import DispatchScheduledIntegrationsTask
+from operators.dispatch_operators import find_and_prepare_due_integrations
 
 
 # ---------------------------------------------------------------------------
@@ -876,8 +876,8 @@ class TestCleanUpS3ToMongoTask:
             operator.execute(context)
 
 
-class TestDispatchScheduledIntegrationsTask:
-    """Test DispatchScheduledIntegrationsTask operator."""
+class TestFindAndPrepareDueIntegrations:
+    """Test find_and_prepare_due_integrations() controller function."""
 
     def _make_integration_row(
         self,
@@ -910,21 +910,14 @@ class TestDispatchScheduledIntegrationsTask:
         row.json_data = json_data
         return row
 
-    @patch("shared_utils.dag_trigger.get_airflow_auth_headers")
-    @patch("shared_utils.dag_trigger.requests.post")
     @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
-    def test_dispatch_success(self, mock_config, mock_engine_cls, mock_post, mock_auth_headers):
-        """Test successful dispatch of one integration (no integration_run creation)."""
-        # Setup config
+    def test_returns_correct_confs(self, mock_config, mock_engine_cls):
+        """Test successful preparation of one due integration."""
         config = Mock()
         config.control_plane_db_url = "mysql+pymysql://test"
-        config.airflow_internal_api_url = "http://airflow:8080/api/v2"
-        config.airflow_username = "airflow"
-        config.airflow_password = "airflow"
         mock_config.return_value = config
 
-        # Setup DB engine
         integration_row = self._make_integration_row()
         auth_row = self._make_auth_row()
 
@@ -932,13 +925,12 @@ class TestDispatchScheduledIntegrationsTask:
         mock_engine = MagicMock()
         mock_engine_cls.return_value = mock_engine
 
-        # Track which query is being called
         call_count = {"n": 0}
         def execute_side_effect(query, *args, **kwargs):
             call_count["n"] += 1
             result = MagicMock()
             if call_count["n"] == 1:
-                # First call: find integrations
+                # First call: find due integrations
                 result.fetchall.return_value = [integration_row]
             elif call_count["n"] == 2:
                 # Second call: find auth records
@@ -949,41 +941,23 @@ class TestDispatchScheduledIntegrationsTask:
         mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
         mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
 
-        # Setup REST API response
-        mock_auth_headers.return_value = {"Authorization": "Bearer token"}
-        mock_post.return_value = Mock(status_code=200)
-        mock_post.return_value.json.return_value = {"dag_run_id": "test_run_id"}
-        mock_post.return_value.raise_for_status = Mock()
+        result = find_and_prepare_due_integrations(integration_type="s3_to_mongo")
 
-        # Execute
-        operator = DispatchScheduledIntegrationsTask(
-            task_id="dispatch", schedule_hour=2, integration_type="s3_to_mongo"
-        )
-        result = operator.execute({})
-
-        # Verify
-        assert result["dispatched"] == 1
-        assert result["errors"] == 0
-        assert len(result["results"]) == 1
-        assert result["results"][0]["integration_id"] == 1
-        assert result["results"][0]["status"] == "triggered"
-
-        # Verify REST API was called
-        mock_post.assert_called_once()
-        call_kwargs = mock_post.call_args
-        assert "s3_to_mongo_ondemand" in call_kwargs[0][0]
-        payload = call_kwargs[1]["json"]
-        assert payload["conf"]["s3_bucket"] == "my-bucket"
-        assert payload["conf"]["integration_id"] == 1
-        assert payload["conf"]["s3_access_key"] == "ak"
+        assert len(result) == 1
+        assert "conf" in result[0]
+        assert "trigger_run_id" in result[0]
+        assert result[0]["conf"]["s3_bucket"] == "my-bucket"
+        assert result[0]["conf"]["integration_id"] == 1
+        assert result[0]["conf"]["s3_access_key"] == "ak"
+        assert "traceparent" in result[0]["conf"]
 
         # Verify: 3 DB calls (find integrations + find auths + advance utc_next_run)
         assert mock_conn.execute.call_count == 3
 
     @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
-    def test_dispatch_no_matching_integrations(self, mock_config, mock_engine_cls):
-        """Test dispatch returns empty when no integrations match."""
+    def test_empty_result(self, mock_config, mock_engine_cls):
+        """Test returns empty list when no integrations are due."""
         config = Mock()
         config.control_plane_db_url = "mysql+pymysql://test"
         mock_config.return_value = config
@@ -995,25 +969,16 @@ class TestDispatchScheduledIntegrationsTask:
         mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
         mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
 
-        operator = DispatchScheduledIntegrationsTask(
-            task_id="dispatch", schedule_hour=2, integration_type="s3_to_mongo"
-        )
-        result = operator.execute({})
+        result = find_and_prepare_due_integrations(integration_type="s3_to_mongo")
 
-        assert result["dispatched"] == 0
-        assert result["total"] == 0
+        assert result == []
 
-    @patch("shared_utils.dag_trigger.get_airflow_auth_headers")
-    @patch("shared_utils.dag_trigger.requests.post")
     @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
-    def test_dispatch_continues_on_error(self, mock_config, mock_engine_cls, mock_post, mock_auth_headers):
+    def test_error_isolation(self, mock_config, mock_engine_cls):
         """Test that one integration failing doesn't stop others."""
         config = Mock()
         config.control_plane_db_url = "mysql+pymysql://test"
-        config.airflow_internal_api_url = "http://airflow:8080/api/v2"
-        config.airflow_username = "airflow"
-        config.airflow_password = "airflow"
         mock_config.return_value = config
 
         row1 = self._make_integration_row(integration_id=1)
@@ -1029,8 +994,13 @@ class TestDispatchScheduledIntegrationsTask:
             call_count["n"] += 1
             result = MagicMock()
             if call_count["n"] == 1:
+                # Find integrations
                 result.fetchall.return_value = [row1, row2]
-            else:
+            elif call_count["n"] == 2:
+                # Auth query for row1 fails
+                raise Exception("DB auth error")
+            elif call_count["n"] == 3:
+                # Auth query for row2 succeeds
                 result.fetchall.return_value = [auth_row]
             return result
 
@@ -1038,135 +1008,64 @@ class TestDispatchScheduledIntegrationsTask:
         mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
         mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
 
-        mock_auth_headers.return_value = {"Authorization": "Bearer token"}
-        # First call fails, second succeeds
-        mock_post.side_effect = [
-            Exception("API error"),
-            Mock(status_code=200, json=Mock(return_value={"dag_run_id": "run2"}), raise_for_status=Mock()),
-        ]
+        result = find_and_prepare_due_integrations(integration_type="s3_to_mongo")
 
-        operator = DispatchScheduledIntegrationsTask(
-            task_id="dispatch", schedule_hour=2, integration_type="s3_to_mongo"
-        )
-        result = operator.execute({})
-
-        assert result["dispatched"] == 1
-        assert result["errors"] == 1
-        assert result["total"] == 2
-        assert result["results"][0]["status"] == "error"
-        assert result["results"][1]["status"] == "triggered"
-
-    def test_extract_hour(self):
-        """Test cron hour extraction."""
-        assert DispatchScheduledIntegrationsTask._extract_hour("0 2 * * *") == 2
-        assert DispatchScheduledIntegrationsTask._extract_hour("0 14 * * *") == 14
-        assert DispatchScheduledIntegrationsTask._extract_hour("0 0 * * *") == 0
-        assert DispatchScheduledIntegrationsTask._extract_hour("bad cron") is None
-        assert DispatchScheduledIntegrationsTask._extract_hour("") is None
-
-    @patch("operators.dispatch_operators.create_control_plane_engine")
-    @patch("operators.dispatch_operators.get_control_plane_config")
-    def test_dispatch_filters_by_hour(self, mock_config, mock_engine_cls):
-        """Test that only integrations matching the schedule hour are dispatched."""
-        config = Mock()
-        config.control_plane_db_url = "mysql+pymysql://test"
-        mock_config.return_value = config
-
-        row_h2 = self._make_integration_row(integration_id=1, utc_sch_cron="0 2 * * *")
-        row_h5 = self._make_integration_row(integration_id=2, utc_sch_cron="0 5 * * *")
-
-        mock_conn = MagicMock()
-        mock_engine = MagicMock()
-        mock_engine_cls.return_value = mock_engine
-        mock_conn.execute.return_value.fetchall.return_value = [row_h2, row_h5]
-        mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
-        mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
-
-        operator = DispatchScheduledIntegrationsTask(
-            task_id="dispatch", schedule_hour=2, integration_type="s3_to_mongo"
-        )
-        # Call _find_due_integrations directly to test filtering
-        matched = operator._find_due_integrations(mock_engine)
-
-        assert len(matched) == 1
-        assert matched[0].integration_id == 1
+        # Only the second integration succeeds
+        assert len(result) == 1
+        assert result[0]["conf"]["integration_id"] == 2
 
     @patch("operators.dispatch_operators.get_control_plane_config")
-    def test_dispatch_no_db_url(self, mock_config):
-        """Test dispatch handles missing DB URL gracefully."""
+    def test_no_db_url(self, mock_config):
+        """Test returns empty list when DB URL is not set."""
         config = Mock()
         config.control_plane_db_url = ""
         mock_config.return_value = config
 
-        operator = DispatchScheduledIntegrationsTask(
-            task_id="dispatch", schedule_hour=2
-        )
-        result = operator.execute({})
+        result = find_and_prepare_due_integrations()
 
-        assert result["dispatched"] == 0
+        assert result == []
 
     @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
-    def test_weekly_dispatches_all_active(self, mock_config, mock_engine_cls):
-        """Weekly dispatcher returns all active weekly integrations (no hour filter)."""
+    def test_trigger_run_id_format(self, mock_config, mock_engine_cls):
+        """Test trigger_run_id preserves the expected format."""
         config = Mock()
         config.control_plane_db_url = "mysql+pymysql://test"
         mock_config.return_value = config
 
-        row1 = self._make_integration_row(integration_id=1, utc_sch_cron="0 3 * * 1")
-        row2 = self._make_integration_row(integration_id=2, utc_sch_cron="0 5 * * 1")
+        integration_row = self._make_integration_row(workspace_id="ws-test-123")
+        auth_row = self._make_auth_row()
 
         mock_conn = MagicMock()
         mock_engine = MagicMock()
         mock_engine_cls.return_value = mock_engine
-        mock_conn.execute.return_value.fetchall.return_value = [row1, row2]
+
+        call_count = {"n": 0}
+        def execute_side_effect(query, *args, **kwargs):
+            call_count["n"] += 1
+            result = MagicMock()
+            if call_count["n"] == 1:
+                result.fetchall.return_value = [integration_row]
+            elif call_count["n"] == 2:
+                result.fetchall.return_value = [auth_row]
+            return result
+
+        mock_conn.execute.side_effect = execute_side_effect
         mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
         mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
 
-        operator = DispatchScheduledIntegrationsTask(
-            task_id="dispatch", schedule_type="weekly", integration_type="s3_to_mongo"
-        )
-        matched = operator._find_due_integrations(mock_engine)
+        result = find_and_prepare_due_integrations(integration_type="s3_to_mongo")
 
-        # Weekly returns ALL active integrations regardless of cron hour
-        assert len(matched) == 2
-
-    @patch("operators.dispatch_operators.create_control_plane_engine")
-    @patch("operators.dispatch_operators.get_control_plane_config")
-    def test_monthly_dispatches_all_active(self, mock_config, mock_engine_cls):
-        """Monthly dispatcher returns all active monthly integrations (no hour filter)."""
-        config = Mock()
-        config.control_plane_db_url = "mysql+pymysql://test"
-        mock_config.return_value = config
-
-        row1 = self._make_integration_row(integration_id=1, utc_sch_cron="0 4 1 * *")
-
-        mock_conn = MagicMock()
-        mock_engine = MagicMock()
-        mock_engine_cls.return_value = mock_engine
-        mock_conn.execute.return_value.fetchall.return_value = [row1]
-        mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
-        mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
-
-        operator = DispatchScheduledIntegrationsTask(
-            task_id="dispatch", schedule_type="monthly", integration_type="s3_to_mongo"
-        )
-        matched = operator._find_due_integrations(mock_engine)
-
-        assert len(matched) == 1
-        assert matched[0].integration_id == 1
-
+        trigger_run_id = result[0]["trigger_run_id"]
+        assert trigger_run_id.startswith("ws-test-123_s3_to_mongo_ondemand_scheduled_")
 
     @patch("operators.dispatch_operators.croniter")
     @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
-    def test_dispatch_advances_utc_next_run(self, mock_config, mock_engine_cls, mock_croniter):
-        """Verify _advance_next_run computes next cron occurrence and UPDATEs the DB."""
+    def test_advances_utc_next_run(self, mock_config, mock_engine_cls, mock_croniter):
+        """Verify utc_next_run is advanced via croniter."""
         from datetime import datetime, timezone
-
-        config = Mock()
-        config.control_plane_db_url = "mysql+pymysql://test"
-        mock_config.return_value = config
+        from operators.dispatch_operators import _advance_next_run
 
         future_dt = datetime(2026, 3, 22, 2, 0, tzinfo=timezone.utc)
         mock_croniter_instance = MagicMock()
@@ -1177,34 +1076,22 @@ class TestDispatchScheduledIntegrationsTask:
 
         mock_conn = MagicMock()
         mock_engine = MagicMock()
-        mock_engine_cls.return_value = mock_engine
         mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
         mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
 
-        operator = DispatchScheduledIntegrationsTask(task_id="test_advance")
-        operator._advance_next_run(mock_engine, row)
+        _advance_next_run(mock_engine, row)
 
-        # Verify croniter was called with the cron expression
         mock_croniter.assert_called_once()
         assert mock_croniter.call_args[0][0] == "0 2 * * *"
-
-        # Verify UPDATE was executed
         mock_conn.execute.assert_called_once()
         mock_conn.commit.assert_called_once()
 
-    @patch("shared_utils.dag_trigger.get_airflow_auth_headers")
-    @patch("shared_utils.dag_trigger.requests.post")
     @patch("operators.dispatch_operators.create_control_plane_engine")
     @patch("operators.dispatch_operators.get_control_plane_config")
-    def test_dispatch_advance_failure_does_not_break_dispatch(
-        self, mock_config, mock_engine_cls, mock_post, mock_auth_headers
-    ):
-        """If _advance_next_run fails, the dispatch still succeeds."""
+    def test_advance_failure_does_not_break_dispatch(self, mock_config, mock_engine_cls):
+        """If _advance_next_run fails, the integration is still included."""
         config = Mock()
         config.control_plane_db_url = "mysql+pymysql://test"
-        config.airflow_internal_api_url = "http://airflow:8080/api/v2"
-        config.airflow_username = "airflow"
-        config.airflow_password = "airflow"
         mock_config.return_value = config
 
         integration_row = self._make_integration_row()
@@ -1231,20 +1118,11 @@ class TestDispatchScheduledIntegrationsTask:
         mock_engine.connect.return_value.__enter__ = Mock(return_value=mock_conn)
         mock_engine.connect.return_value.__exit__ = Mock(return_value=False)
 
-        mock_auth_headers.return_value = {"Authorization": "Bearer token"}
-        mock_post.return_value = Mock(status_code=200)
-        mock_post.return_value.json.return_value = {"dag_run_id": "test_run_id"}
-        mock_post.return_value.raise_for_status = Mock()
+        result = find_and_prepare_due_integrations(integration_type="s3_to_mongo")
 
-        operator = DispatchScheduledIntegrationsTask(
-            task_id="dispatch", schedule_hour=2, integration_type="s3_to_mongo"
-        )
-        result = operator.execute({})
-
-        # Dispatch still succeeds despite advance failure
-        assert result["dispatched"] == 1
-        assert result["errors"] == 0
-        assert result["results"][0]["status"] == "triggered"
+        # Integration still included despite advance failure
+        assert len(result) == 1
+        assert result[0]["conf"]["integration_id"] == 1
 
 
 if __name__ == "__main__":

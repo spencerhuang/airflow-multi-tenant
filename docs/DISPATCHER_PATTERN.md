@@ -1,27 +1,28 @@
-# Dispatcher Pattern for Scheduled DAGs
+# Controller DAG Pattern for Scheduled Integrations
 
 ## Problem
 
 Airflow's scheduler triggers DAG runs with `conf={}`. Our data pipeline operators (e.g., `PrepareS3ToMongoTask`) require configuration like `s3_bucket`, `mongo_collection`, and credentials — all passed via `dag_run.conf`. This means **scheduled DAGs cannot run the pipeline directly**.
 
-On-demand DAGs work because they're triggered via the Airflow REST API with a full `conf` dict (by the control plane service or Kafka consumer). But daily scheduled DAGs have no caller to provide that conf.
+## Solution: Controller DAG with Dynamic Task Mapping (DTM)
 
-## Solution: Dispatcher Pattern
-
-Scheduled DAGs act as lightweight **dispatchers** instead of running the pipeline directly:
+A single **Controller DAG** (`s3_to_mongo_controller`) runs every hour and uses DTM to dispatch all due integrations:
 
 ```
-Airflow Scheduler (cron: 0 2 * * *)
-  → daily_02 DAG runs DispatchScheduledIntegrationsTask
-    → Queries control plane DB for active integrations due at hour=2
-    → For each integration:
+Airflow Scheduler (cron: 0 * * * *)
+  → s3_to_mongo_controller runs find_due_integrations (@task)
+    → Queries control plane DB: WHERE utc_next_run <= now
+    → For each due integration:
       1. Builds conf dict (same as control plane / Kafka consumer)
-      2. Creates IntegrationRun record
-      3. Triggers s3_to_mongo_ondemand DAG via Airflow REST API
-    → Returns summary of dispatched runs
+      2. Generates trigger_run_id
+      3. Advances utc_next_run to next cron occurrence
+    → Returns list of {conf, trigger_run_id} dicts
+  → TriggerDagRunOperator.expand_kwargs(due)
+    → Fires one s3_to_mongo_ondemand DAG run per integration
+    → wait_for_completion=False — controller finishes in seconds
 ```
 
-Each integration gets its own isolated DAG run on `s3_to_mongo_ondemand`, reusing the existing pipeline (`Prepare → Validate → Execute → Cleanup`) without modification. The `_ondemand` DAG is a shared pipeline — all trigger sources (control plane API, Kafka CDC, and the dispatcher) target it. The `dag_run_id` encodes the origin (e.g., `_scheduled_` for dispatcher, `_manual_` for API, `_cdc_` for Kafka).
+Each integration gets its own isolated DAG run on `s3_to_mongo_ondemand`, reusing the existing pipeline (`Prepare → Validate → Execute → Cleanup`) without modification.
 
 ## Why This Pattern
 
@@ -29,102 +30,79 @@ Each integration gets its own isolated DAG run on `s3_to_mongo_ondemand`, reusin
 |---|---|
 | Pass conf in scheduled DAG | Scheduler provides `conf={}` — impossible |
 | Hardcode config in DAG file | Doesn't scale to thousands of tenants |
-| Use Airflow Variables/Connections | Still need per-tenant lookup logic at runtime |
-| **Dispatcher (chosen)** | Queries DB at runtime, reuses ondemand pipeline, each integration isolated |
+| Static per-hour DAGs (daily_02, daily_03, ...) | Need 24+ DAG files, operational overhead |
+| **Controller + DTM (chosen)** | Single DAG, queries DB at runtime, fires all due runs in seconds |
+
+### Key Benefits
+
+- **Single DAG** replaces 26+ static dispatcher files (24 hourly + weekly + monthly)
+- **`utc_next_run <= now`** — universal "is due" check handles daily, weekly, monthly uniformly
+- **`wait_for_completion=False`** — controller fires and forgets, no "hanging parent" risk
+- **Native TriggerDagRunOperator** — no REST API self-triggering needed
+- **`catchup=False`** — past-due integrations caught naturally on next run
 
 ## How It Works
 
-### DispatchScheduledIntegrationsTask
+### Controller DAG
+
+Located in `airflow/dags/s3_to_mongo_controller.py`.
+
+```python
+with DAG(
+    dag_id="s3_to_mongo_controller",
+    schedule="0 * * * *",  # Every hour
+    catchup=False,
+    max_active_runs=1,
+) as dag:
+
+    @task
+    def find_due_integrations() -> list[dict]:
+        from operators.dispatch_operators import find_and_prepare_due_integrations
+        return find_and_prepare_due_integrations(integration_type="s3_to_mongo")
+
+    due = find_due_integrations()
+
+    TriggerDagRunOperator.partial(
+        task_id="trigger_ondemand",
+        trigger_dag_id="s3_to_mongo_ondemand",
+        wait_for_completion=False,
+        reset_dag_run=False,
+    ).expand_kwargs(due)
+```
+
+### find_and_prepare_due_integrations()
 
 Located in `airflow/plugins/operators/dispatch_operators.py`.
 
-**Constructor args:**
-- `schedule_hour` (int): UTC hour to match (0–23)
-- `integration_type` (str): e.g., `"s3_to_mongo"`
-
-**Execute flow:**
-
-1. **Find due integrations** — queries `integrations` table:
-   ```sql
-   WHERE schedule_type = 'daily'
-     AND usr_sch_status = 'active'
-     AND integration_type = :type
-     AND utc_sch_cron IS NOT NULL
-   ```
-   Then filters by hour in Python (parses cron expression `"0 2 * * *"` → hour 2).
-
-2. **Build conf** — for each integration, merges:
-   - Integration fields: `tenant_id`, `integration_id`, `auth_id`, access point IDs
-   - `integration.json_data`: non-sensitive workflow config (`s3_bucket`, `s3_prefix`, `mongo_collection`)
-   - All `auth` records for the workspace: credentials (`s3_access_key`, `mongo_uri`, etc.)
-
-   This is the same conf-building pattern used by the control plane's `integration_service` and the standalone `kafka_consumer` microservice.
-
-3. **Trigger the pipeline DAG** — POSTs to the `s3_to_mongo_ondemand` DAG via Airflow REST API. The DAG name is `_ondemand` because it's the same shared pipeline used by all trigger sources (API, Kafka, dispatcher). The `_scheduled_` in the `dag_run_id` distinguishes dispatcher-originated runs from other sources.
-   ```
-   POST /api/v2/dags/s3_to_mongo_ondemand/dagRuns
-   {
-     "dag_run_id": "e2e-test-ws-5cc71c1c_s3_to_mongo_ondemand_scheduled_20260310_204234_0",
-     "logical_date": "2026-03-10T20:42:34.012345Z",
-     "conf": { ... merged conf ... }
-   }
-   ```
-
-   **`dag_run_id` format**: `{tenant_id}_{dag_id}_scheduled_{YYYYMMDD_HHMMSS_f}`
-   - `e2e-test-ws-5cc71c1c` — tenant/workspace ID
-   - `s3_to_mongo_ondemand` — target DAG ID
-   - `scheduled` — origin marker (vs `manual` from API or `cdc` from Kafka)
-   - `20260310_204234_0` — UTC timestamp with microsecond fragment
-
-4. **Create IntegrationRun** — inserts a tracking record in the control plane DB.
-
-5. **Continue on error** — if one integration fails, logs the error and continues with the rest. Returns a summary with successes and failures.
-
-### DAG Definition
-
-```python
-# airflow/dags/s3_to_mongo_daily_02.py
-from operators.dispatch_operators import DispatchScheduledIntegrationsTask
-
-with DAG(
-    dag_id="s3_to_mongo_daily_02",
-    schedule="0 2 * * *",
-    max_active_runs=1,
-    ...
-) as dag:
-    dispatch = DispatchScheduledIntegrationsTask(
-        task_id="dispatch_integrations",
-        schedule_hour=2,
-        integration_type="s3_to_mongo",
-    )
+**Query** — single unified query for all schedule types:
+```sql
+SELECT * FROM integrations
+WHERE usr_sch_status = 'active'
+  AND integration_type = :type
+  AND schedule_type IN ('daily', 'weekly', 'monthly')
+  AND utc_next_run IS NOT NULL
+  AND utc_next_run <= :now
 ```
 
-To add more schedule hours, create additional DAGs (e.g., `s3_to_mongo_daily_03`) with `schedule_hour=3`.
+**Per integration:**
+1. **Build conf** — merges integration fields, `json_data`, and auth credentials (same pattern as control plane API and Kafka consumer)
+2. **Generate trigger_run_id** — format: `{tenant_id}_s3_to_mongo_ondemand_scheduled_{timestamp}`
+3. **Advance utc_next_run** — uses croniter to compute next cron occurrence
+4. **Error isolation** — if one integration fails, log and skip; others still dispatched
+
+**Returns** `list[dict]` where each dict has `{"conf": {...}, "trigger_run_id": "..."}` — suitable for `TriggerDagRunOperator.expand_kwargs()`.
 
 ## Environment Variables
 
-The dispatcher runs **inside Airflow workers** and needs to:
-1. Query the control plane MySQL database
-2. Call the Airflow REST API to trigger ondemand DAGs
-
-This requires these environment variables on all Airflow containers:
+The controller runs **inside Airflow workers** and needs to query the control plane MySQL database:
 
 | Variable | Purpose | Default |
 |---|---|---|
 | `CONTROL_PLANE_DB_URL` | MySQL connection for querying integrations and auth records | — |
-| `AIRFLOW_INTERNAL_API_URL` | Airflow API server URL (internal Docker network) | `http://airflow-apiserver:8080/api/v2` |
-| `AIRFLOW_USERNAME` | Credentials for Airflow REST API authentication | `airflow` |
-| `AIRFLOW_PASSWORD` | Credentials for Airflow REST API authentication | `airflow` |
 
-**Why does Airflow need its own username/password?**
-
-The dispatcher task runs in an Airflow worker process. To trigger a new DAG run, it calls the Airflow REST API (`POST /dags/{dag_id}/dagRuns`), which requires JWT authentication. The worker authenticates using `AIRFLOW_USERNAME` / `AIRFLOW_PASSWORD` via `get_airflow_auth_headers()` — the same utility the control plane service uses. These are credentials for "self-triggering": an Airflow task calling back into the Airflow API server.
-
-These are set in `docker-compose.yml` under `x-airflow-common > environment` and read by `airflow/config/airflow_config.py` (`ControlPlaneConfig.from_env()`).
+Note: `AIRFLOW_INTERNAL_API_URL` / `AIRFLOW_USERNAME` / `AIRFLOW_PASSWORD` are **not needed** for the controller — it uses native `TriggerDagRunOperator` instead of REST API. These variables are still needed by the control plane service and Kafka consumer for external triggering.
 
 ## Data Flow Comparison
-
-All three triggering paths build identical conf dicts:
 
 All three triggering paths target the same `s3_to_mongo_ondemand` DAG and build identical conf dicts. The `dag_run_id` encodes the origin:
 
@@ -132,19 +110,17 @@ All three triggering paths target the same `s3_to_mongo_ondemand` DAG and build 
 |---|---|---|
 | Control plane API | On-demand / manual | `ws-abc123_s3_to_mongo_ondemand_manual_20260310_183116_3` |
 | Kafka consumer | CDC event | `ws-abc123_s3_to_mongo_ondemand_cdc_20260310_183335_2` |
-| **Dispatcher DAG** | Cron schedule | `ws-abc123_s3_to_mongo_ondemand_scheduled_20260310_204234_0` |
-
-All three query the same tables (`integrations`, `auths`) and merge credentials the same way, ensuring consistent behavior regardless of how a DAG run is triggered. The origin marker (`manual`, `cdc`, `scheduled`) makes it easy to trace how a run was initiated when debugging in the Airflow UI.
+| **Controller DAG** | Hourly cron | `ws-abc123_s3_to_mongo_ondemand_scheduled_20260310_204234_0` |
 
 ## Testing
 
 ### Unit Tests
 
 ```bash
-pytest airflow/tests/test_s3_to_mongo_operators.py -v -k "dispatch"
+pytest airflow/tests/test_s3_to_mongo_operators.py -v -k "FindAndPrepare"
 ```
 
-Covers: successful dispatch, no matching integrations, continue-on-error, hour extraction, hour filtering, missing DB URL.
+Covers: correct confs, empty results, error isolation, utc_next_run advancement, missing DB URL, trigger_run_id format.
 
 ### E2E Test
 
@@ -153,17 +129,11 @@ pytest control_plane/tests/test_cron_scheduled_e2e.py -v -s
 ```
 
 Full pipeline validation:
-1. Seeds MySQL with test customer, workspace, auth records, and integration
+1. Seeds MySQL with test customer, workspace, auth records, and integration (with `utc_next_run` in the past)
 2. Uploads test data to MinIO
-3. Deploys a test dispatcher DAG (`schedule="* * * * *"`)
+3. Deploys a test controller DAG (`schedule="* * * * *"`)
 4. Waits for Airflow scheduler to trigger it
 5. Waits for dispatched ondemand DAG to complete
 6. Verifies data in MongoDB
 7. Verifies IntegrationRun record in MySQL
 8. Cleans up all test state
-
-### Airflow 3.0 Notes
-
-- **DAG detection**: Airflow 3.0's dag-processor uses a "bundle" system with refresh intervals. New DAG files aren't detected until the next refresh. The e2e test works around this by restarting the dag-processor after deploying the test DAG.
-- **REST API**: `logical_date` is required when creating DAG runs. Use microsecond precision (`%Y-%m-%dT%H:%M:%S.%fZ`) to avoid conflicts when dispatching multiple integrations.
-- **API pagination**: `order_by=-queued_at` is not supported; use `order_by=-logical_date` instead.

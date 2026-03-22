@@ -134,31 +134,23 @@ def determine_dag_id(
 ) -> str:
     """Determine the Airflow DAG ID for an integration.
 
-    For daily schedules with a valid ``utc_sch_cron``, returns a
-    DAG ID like ``s3_to_mongo_daily_02``.  For everything else
-    (weekly, monthly, on_demand, cdc) returns ``s3_to_mongo_ondemand``.
+    Always returns ``{workflow_name}_ondemand``. The hourly Controller
+    DAG (s3_to_mongo_controller) handles all scheduled dispatching via
+    DTM, so there are no per-hour or per-frequency DAG IDs. All trigger
+    sources (control plane API, Kafka CDC, controller) target the same
+    ondemand pipeline DAG.
 
     Pure function — no side effects.
 
     Args:
         integration_type: e.g. ``"s3_to_mongo"`` or ``"S3ToMongo"``.
         schedule_type: e.g. ``"daily"``, ``"weekly"``, ``"on_demand"``.
-        utc_sch_cron: UTC cron expression (e.g. ``"0 2 * * *"``).
+        utc_sch_cron: UTC cron expression (kept for API compatibility).
 
     Returns:
         DAG ID string.
     """
     workflow_name = integration_type.lower().replace("to", "_to_")
-
-    if schedule_type == "daily" and utc_sch_cron:
-        try:
-            parts = utc_sch_cron.strip().split()
-            if len(parts) >= 2:
-                hour = parts[1].zfill(2)
-                return f"{workflow_name}_daily_{hour}"
-        except (IndexError, ValueError):
-            pass
-
     return f"{workflow_name}_ondemand"
 
 

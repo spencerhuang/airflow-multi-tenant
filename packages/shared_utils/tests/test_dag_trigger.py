@@ -191,15 +191,14 @@ class TestResolveAuthCredentialsSync:
 # ---------------------------------------------------------------------------
 
 class TestDetermineDagId:
-    """Tests use CamelCase integration_type (e.g. 'S3ToMongo') which is
-    the format stored in the database.  The function lowercases and
-    replaces 'to' with '_to_' to produce DAG names like 's3_to_mongo'."""
+    """All schedule types now return _ondemand. The hourly Controller DAG
+    handles scheduled dispatching via DTM — no per-hour DAG IDs exist."""
 
     def test_daily_with_valid_cron(self):
-        assert determine_dag_id("S3ToMongo", "daily", "0 2 * * *") == "s3_to_mongo_daily_02"
+        assert determine_dag_id("S3ToMongo", "daily", "0 2 * * *") == "s3_to_mongo_ondemand"
 
     def test_daily_with_two_digit_hour(self):
-        assert determine_dag_id("S3ToMongo", "daily", "0 14 * * *") == "s3_to_mongo_daily_14"
+        assert determine_dag_id("S3ToMongo", "daily", "0 14 * * *") == "s3_to_mongo_ondemand"
 
     def test_daily_without_cron(self):
         assert determine_dag_id("S3ToMongo", "daily", None) == "s3_to_mongo_ondemand"
@@ -217,7 +216,7 @@ class TestDetermineDagId:
         assert determine_dag_id("S3ToMongo", "daily", "invalid") == "s3_to_mongo_ondemand"
 
     def test_daily_zero_hour(self):
-        assert determine_dag_id("S3ToMongo", "daily", "0 0 * * *") == "s3_to_mongo_daily_00"
+        assert determine_dag_id("S3ToMongo", "daily", "0 0 * * *") == "s3_to_mongo_ondemand"
 
     def test_already_snake_case_input(self):
         # When integration_type is already snake_case (e.g. from dispatcher),

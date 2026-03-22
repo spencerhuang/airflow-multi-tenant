@@ -1,16 +1,16 @@
-"""End-to-end test for Airflow cron-scheduled DAG execution via dispatcher.
+"""End-to-end test for Airflow cron-scheduled DAG execution via Controller DAG.
 
 This test validates the full scheduling pipeline:
-1. Airflow's scheduler triggers a dispatcher DAG on cron schedule
-2. The dispatcher queries the control plane DB for due integrations
-3. For each integration, it triggers s3_to_mongo_ondemand with the correct conf
+1. Airflow's scheduler triggers the Controller DAG on cron schedule
+2. The controller queries the control plane DB for due integrations (utc_next_run <= now)
+3. For each due integration, it triggers s3_to_mongo_ondemand via TriggerDagRunOperator (DTM)
 4. The ondemand DAG processes S3 data into MongoDB
 
 Test Flow:
-1. Seed control plane MySQL with test customer, workspace, auth, integration
+1. Seed control plane MySQL with test customer, workspace, auth, integration (with utc_next_run in the past)
 2. Upload test data to MinIO (S3)
-3. Deploy a test dispatcher DAG with schedule="* * * * *"
-4. Wait for Airflow's scheduler to trigger the dispatcher
+3. Deploy a test controller DAG with schedule="* * * * *"
+4. Wait for Airflow's scheduler to trigger the controller
 5. Wait for the dispatched ondemand DAG to complete
 6. Verify data in MongoDB
 7. Clean up all test state
@@ -66,42 +66,50 @@ MYSQL_DB = "control_plane"
 TEST_BUCKET = "test-cron-e2e"
 TEST_PREFIX = "cron-data/"
 TEST_COLLECTION = "test_cron_e2e"
-DISPATCHER_DAG_ID = "s3_to_mongo_dispatch_e2e_test"
+CONTROLLER_DAG_ID = "s3_to_mongo_controller_e2e_test"
 ONDEMAND_DAG_ID = "s3_to_mongo_ondemand"
-# Use a fixed test hour that the dispatcher will match against
-TEST_SCHEDULE_HOUR = 23
 
 # Unique IDs for test data (avoid collision with real data)
 TEST_CUSTOMER_GUID = "e2e-test-cust-" + uuid.uuid4().hex[:8]
 TEST_WORKSPACE_ID = "e2e-test-ws-" + uuid.uuid4().hex[:8]
 
 DAG_FILE_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "airflow", "dags", f"{DISPATCHER_DAG_ID}.py"
+    os.path.dirname(__file__), "..", "..", "airflow", "dags", f"{CONTROLLER_DAG_ID}.py"
 )
 
 # ---------------------------------------------------------------------------
-# The temporary dispatcher DAG file content
+# The temporary controller DAG file content (DTM pattern)
 # ---------------------------------------------------------------------------
 DAG_FILE_CONTENT = f'''\
-"""Temporary dispatcher DAG for cron scheduling e2e test. Auto-generated."""
+"""Temporary controller DAG for cron scheduling e2e test. Auto-generated."""
 from datetime import datetime
 from airflow.sdk import DAG
-from operators.dispatch_operators import DispatchScheduledIntegrationsTask
+from airflow.sdk.definitions.decorators import task
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 
 with DAG(
-    dag_id="{DISPATCHER_DAG_ID}",
-    description="Temporary dispatcher DAG for cron scheduling e2e test",
+    dag_id="{CONTROLLER_DAG_ID}",
+    description="Temporary controller DAG for cron scheduling e2e test",
     schedule="* * * * *",
     start_date=datetime(2025, 1, 1),
     catchup=False,
     max_active_runs=1,
-    tags=["test", "e2e", "cron", "dispatcher"],
+    tags=["test", "e2e", "cron", "controller"],
 ) as dag:
-    dispatch = DispatchScheduledIntegrationsTask(
-        task_id="dispatch_integrations",
-        schedule_hour={TEST_SCHEDULE_HOUR},
-        integration_type="s3_to_mongo",
-    )
+
+    @task
+    def find_due_integrations() -> list[dict]:
+        from operators.dispatch_operators import find_and_prepare_due_integrations
+        return find_and_prepare_due_integrations(integration_type="s3_to_mongo")
+
+    due = find_due_integrations()
+
+    TriggerDagRunOperator.partial(
+        task_id="trigger_ondemand",
+        trigger_dag_id="{ONDEMAND_DAG_ID}",
+        wait_for_completion=False,
+        reset_dag_run=False,
+    ).expand_kwargs(due)
 '''
 
 
@@ -256,14 +264,16 @@ def seed_mysql(wait_for_services):
             "s3_prefix": TEST_PREFIX,
             "mongo_collection": TEST_COLLECTION,
         })
+        # Set utc_next_run to the past so the controller picks it up immediately
         cursor.execute(
             """INSERT INTO integrations
                (workspace_id, workflow_id, auth_id, source_access_pt_id, dest_access_pt_id,
-                integration_type, schedule_type, usr_sch_status, utc_sch_cron, json_data,
-                created_at, updated_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())""",
+                integration_type, schedule_type, usr_sch_status, utc_sch_cron, utc_next_run,
+                json_data, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())""",
             (TEST_WORKSPACE_ID, workflow_id, auth_id, source_ap_id, dest_ap_id,
-             "s3_to_mongo", "daily", "active", f"0 {TEST_SCHEDULE_HOUR} * * *",
+             "s3_to_mongo", "daily", "active", "0 * * * *",
+             datetime(2020, 1, 1, tzinfo=timezone.utc),
              integration_json),
         )
         integration_id = cursor.lastrowid
@@ -373,72 +383,85 @@ def mongo_client(wait_for_services):
 
 
 @pytest.fixture(scope="session")
-def deploy_dispatcher_dag(wait_for_services):
-    """Deploy the test dispatcher DAG and wait for Airflow to detect it."""
+def deploy_controller_dag(wait_for_services):
+    """Deploy the test controller DAG and wait for Airflow to detect it."""
     _cleanup_dag_file()
-    _cleanup_airflow_dag(DISPATCHER_DAG_ID)
-    print("\n  Pre-cleaned stale Airflow DAG state")
+    _cleanup_airflow_dag(CONTROLLER_DAG_ID)
+    print("\n  Pre-cleaned stale Airflow controller DAG state")
 
     abs_path = os.path.abspath(DAG_FILE_PATH)
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
     with open(abs_path, "w") as f:
         f.write(DAG_FILE_CONTENT)
-    print(f"  Deployed dispatcher DAG to {abs_path}")
+    print(f"  Deployed controller DAG to {abs_path}")
 
-    # Restart dag-processor to force immediate bundle refresh (Airflow 3.0
-    # won't re-scan the dags-folder bundle until the refresh interval expires)
-    print("  Restarting airflow-dag-processor for immediate DAG detection...")
-    subprocess.run(
-        ["docker", "compose", "restart", "airflow-dag-processor"],
-        cwd=os.path.join(os.path.dirname(__file__), "..", ".."),
-        capture_output=True, timeout=30,
-    )
-    time.sleep(5)  # Give dag-processor a moment to start up
+    # The dag-processor has AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL=30,
+    # so it will detect new DAG files within ~30s. We try reserialize first
+    # for faster detection, but fall back to the natural refresh cycle.
+    repo_root = os.path.join(os.path.dirname(__file__), "..", "..")
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "exec", "-T", "airflow-dag-processor",
+             "airflow", "dags", "reserialize"],
+            cwd=repo_root,
+            capture_output=True, timeout=60,
+        )
+        if result.returncode == 0:
+            print("  DAG reserialize completed successfully")
+        else:
+            print(f"  Reserialize returned {result.returncode}, relying on 30s refresh cycle")
+    except (subprocess.TimeoutExpired, Exception) as e:
+        print(f"  Reserialize skipped ({e}), relying on 30s refresh cycle")
+    time.sleep(5)
 
+    # Poll for DAG detection via API
     detected = False
-    for i in range(30):
+    max_attempts = 40
+    for i in range(max_attempts):
         try:
             headers = _airflow_headers()
-            r = requests.get(f"{AIRFLOW_API_URL}/dags/{DISPATCHER_DAG_ID}", headers=headers, timeout=5)
+            r = requests.get(f"{AIRFLOW_API_URL}/dags/{CONTROLLER_DAG_ID}", headers=headers, timeout=5)
             if r.status_code == 200:
                 detected = True
-                print(f"  Dispatcher DAG detected after ~{i * 3}s")
+                print(f"  Controller DAG detected after ~{i * 3}s")
                 break
         except Exception:
             pass
+        if i % 10 == 0:
+            print(f"  Waiting for DAG detection... ({i * 3}s)")
         time.sleep(3)
 
     if not detected:
         _cleanup_dag_file()
-        pytest.skip("Airflow did not detect the test dispatcher DAG within 90s")
+        pytest.skip("Airflow did not detect the test controller DAG within 120s")
 
     try:
         headers = _airflow_headers()
         requests.patch(
-            f"{AIRFLOW_API_URL}/dags/{DISPATCHER_DAG_ID}",
+            f"{AIRFLOW_API_URL}/dags/{CONTROLLER_DAG_ID}",
             headers=headers, json={"is_paused": False}, timeout=5,
         )
     except Exception:
         pass
 
     deployed_at = datetime.now(timezone.utc).isoformat()
-    print(f"  Dispatcher DAG unpaused at {deployed_at}")
+    print(f"  Controller DAG unpaused at {deployed_at}")
 
-    yield {"dag_id": DISPATCHER_DAG_ID, "detected": detected, "deployed_at": deployed_at}
+    yield {"dag_id": CONTROLLER_DAG_ID, "detected": detected, "deployed_at": deployed_at}
 
-    print(f"\n  Tearing down dispatcher DAG...")
-    _cleanup_airflow_dag(DISPATCHER_DAG_ID)
+    print(f"\n  Tearing down controller DAG...")
+    _cleanup_airflow_dag(CONTROLLER_DAG_ID)
     _cleanup_dag_file()
-    print(f"  Removed dispatcher DAG file and Airflow state")
+    print(f"  Removed controller DAG file and Airflow state")
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-class TestDispatcherScheduledDAG:
-    """End-to-end tests for dispatcher-based cron-scheduled DAG execution."""
+class TestControllerScheduledDAG:
+    """End-to-end tests for Controller DAG cron-scheduled execution via DTM."""
 
-    dispatcher_run_id = None
+    controller_run_id = None
     ondemand_run_id = None
 
     def test_01_upload_test_data(self, minio_client, mongo_client, seed_mysql):
@@ -478,32 +501,32 @@ class TestDispatcherScheduledDAG:
         assert len(objects) == 3
         print(f"\n  Uploaded {len(objects)} files to s3://{TEST_BUCKET}/{TEST_PREFIX}")
 
-    def test_02_verify_dag_detected(self, deploy_dispatcher_dag):
-        """Step 2: Verify Airflow detected the dispatcher DAG."""
+    def test_02_verify_dag_detected(self, deploy_controller_dag):
+        """Step 2: Verify Airflow detected the controller DAG."""
         print("\n" + "=" * 60)
-        print("STEP 2: Verifying dispatcher DAG detection")
+        print("STEP 2: Verifying controller DAG detection")
         print("=" * 60)
 
-        assert deploy_dispatcher_dag["detected"], "Dispatcher DAG was not detected"
+        assert deploy_controller_dag["detected"], "Controller DAG was not detected"
 
         headers = _airflow_headers()
-        r = requests.get(f"{AIRFLOW_API_URL}/dags/{DISPATCHER_DAG_ID}", headers=headers, timeout=5)
+        r = requests.get(f"{AIRFLOW_API_URL}/dags/{CONTROLLER_DAG_ID}", headers=headers, timeout=5)
         assert r.status_code == 200
 
         dag_info = r.json()
         print(f"  DAG ID: {dag_info['dag_id']}")
         print(f"  Is Paused: {dag_info.get('is_paused')}")
         print(f"  Schedule: {dag_info.get('timetable_summary')}")
-        print(f"\n  Dispatcher DAG is active and ready for scheduling")
+        print(f"\n  Controller DAG is active and ready for scheduling")
 
-    def test_03_wait_for_dispatcher_run(self, deploy_dispatcher_dag):
-        """Step 3: Wait for scheduler to trigger the dispatcher DAG."""
+    def test_03_wait_for_controller_run(self, deploy_controller_dag):
+        """Step 3: Wait for scheduler to trigger the controller DAG."""
         print("\n" + "=" * 60)
-        print("STEP 3: Waiting for scheduler-triggered dispatcher run")
+        print("STEP 3: Waiting for scheduler-triggered controller run")
         print("=" * 60)
         print("  (schedule='* * * * *' — expecting a run within ~60-90s)")
 
-        deployed_at = deploy_dispatcher_dag["deployed_at"]
+        deployed_at = deploy_controller_dag["deployed_at"]
         print(f"  Only accepting runs created after: {deployed_at}")
 
         max_wait = 180
@@ -514,7 +537,7 @@ class TestDispatcherScheduledDAG:
             try:
                 headers = _airflow_headers()
                 r = requests.get(
-                    f"{AIRFLOW_API_URL}/dags/{DISPATCHER_DAG_ID}/dagRuns",
+                    f"{AIRFLOW_API_URL}/dags/{CONTROLLER_DAG_ID}/dagRuns",
                     headers=headers, timeout=10,
                 )
                 if r.status_code == 200:
@@ -526,8 +549,8 @@ class TestDispatcherScheduledDAG:
                     ]
                     if new_scheduled:
                         latest = new_scheduled[0]
-                        TestDispatcherScheduledDAG.dispatcher_run_id = latest["dag_run_id"]
-                        print(f"\n  Found NEW dispatcher run after ~{elapsed}s")
+                        TestControllerScheduledDAG.controller_run_id = latest["dag_run_id"]
+                        print(f"\n  Found NEW controller run after ~{elapsed}s")
                         print(f"  DAG Run ID: {latest['dag_run_id']}")
                         print(f"  State: {latest['state']}")
                         return
@@ -539,19 +562,19 @@ class TestDispatcherScheduledDAG:
             time.sleep(interval)
             elapsed += interval
 
-        pytest.fail(f"No dispatcher run appeared within {max_wait}s")
+        pytest.fail(f"No controller run appeared within {max_wait}s")
 
-    def test_04_wait_for_dispatcher_completion(self, deploy_dispatcher_dag):
-        """Step 4: Wait for the dispatcher task to complete."""
+    def test_04_wait_for_controller_completion(self, deploy_controller_dag):
+        """Step 4: Wait for the controller task to complete."""
         print("\n" + "=" * 60)
-        print("STEP 4: Waiting for dispatcher completion")
+        print("STEP 4: Waiting for controller completion")
         print("=" * 60)
 
-        dag_run_id = TestDispatcherScheduledDAG.dispatcher_run_id
+        dag_run_id = TestControllerScheduledDAG.controller_run_id
         if not dag_run_id:
-            pytest.skip("No dispatcher run from test_03")
+            pytest.skip("No controller run from test_03")
 
-        print(f"  Tracking dispatcher: {dag_run_id}")
+        print(f"  Tracking controller: {dag_run_id}")
 
         max_wait = 60
         interval = 5
@@ -562,36 +585,35 @@ class TestDispatcherScheduledDAG:
             try:
                 headers = _airflow_headers()
                 r = requests.get(
-                    f"{AIRFLOW_API_URL}/dags/{DISPATCHER_DAG_ID}/dagRuns/{dag_run_id}",
+                    f"{AIRFLOW_API_URL}/dags/{CONTROLLER_DAG_ID}/dagRuns/{dag_run_id}",
                     headers=headers, timeout=10,
                 )
                 if r.status_code == 200:
                     dag_state = r.json().get("state")
-                    print(f"    Dispatcher state: {dag_state} ({elapsed}s)")
+                    print(f"    Controller state: {dag_state} ({elapsed}s)")
 
                     if dag_state == "success":
-                        print(f"\n  Dispatcher completed successfully!")
+                        print(f"\n  Controller completed successfully!")
                         return
                     elif dag_state == "failed":
-                        # Print task logs for debugging
-                        self._print_task_logs(DISPATCHER_DAG_ID, dag_run_id, "dispatch_integrations")
-                        pytest.fail("Dispatcher DAG run failed. See logs above.")
+                        self._print_task_logs(CONTROLLER_DAG_ID, dag_run_id, "find_due_integrations")
+                        pytest.fail("Controller DAG run failed. See logs above.")
             except Exception as e:
                 print(f"    Warning: {e}")
 
             time.sleep(interval)
             elapsed += interval
 
-        pytest.fail(f"Dispatcher did not complete within {max_wait}s (last state: {dag_state})")
+        pytest.fail(f"Controller did not complete within {max_wait}s (last state: {dag_state})")
 
-    def test_05_wait_for_ondemand_completion(self, deploy_dispatcher_dag):
+    def test_05_wait_for_ondemand_completion(self, deploy_controller_dag):
         """Step 5: Wait for the dispatched ondemand DAG to complete."""
         print("\n" + "=" * 60)
         print("STEP 5: Waiting for dispatched ondemand DAG completion")
         print("=" * 60)
 
-        if not TestDispatcherScheduledDAG.dispatcher_run_id:
-            pytest.skip("No dispatcher run")
+        if not TestControllerScheduledDAG.controller_run_id:
+            pytest.skip("No controller run")
 
         # Find the ondemand DAG run that was dispatched
         max_wait = 120
@@ -616,7 +638,7 @@ class TestDispatcherScheduledDAG:
                     ]
                     if test_runs:
                         latest = test_runs[-1]
-                        TestDispatcherScheduledDAG.ondemand_run_id = latest["dag_run_id"]
+                        TestControllerScheduledDAG.ondemand_run_id = latest["dag_run_id"]
                         dag_state = latest["state"]
                         print(f"    Ondemand run: {latest['dag_run_id']}")
                         print(f"    State: {dag_state} ({elapsed}s)")
@@ -631,7 +653,7 @@ class TestDispatcherScheduledDAG:
             except Exception as e:
                 print(f"    Warning: {e}")
 
-            if elapsed % 15 == 0 and not TestDispatcherScheduledDAG.ondemand_run_id:
+            if elapsed % 15 == 0 and not TestControllerScheduledDAG.ondemand_run_id:
                 print(f"  Waiting for ondemand run... ({elapsed}s / {max_wait}s)")
             time.sleep(interval)
             elapsed += interval
@@ -646,7 +668,7 @@ class TestDispatcherScheduledDAG:
         print("STEP 6: Verifying MongoDB data")
         print("=" * 60)
 
-        if not TestDispatcherScheduledDAG.ondemand_run_id:
+        if not TestControllerScheduledDAG.ondemand_run_id:
             pytest.skip("No completed ondemand DAG run")
 
         time.sleep(2)
@@ -675,7 +697,7 @@ class TestDispatcherScheduledDAG:
         print("STEP 7: Verifying IntegrationRun record")
         print("=" * 60)
 
-        if not TestDispatcherScheduledDAG.ondemand_run_id:
+        if not TestControllerScheduledDAG.ondemand_run_id:
             pytest.skip("No completed ondemand DAG run")
 
         conn = pymysql.connect(
@@ -703,7 +725,7 @@ class TestDispatcherScheduledDAG:
     def test_08_summary(self, minio_client, mongo_client, seed_mysql):
         """Step 8: Summary."""
         print("\n" + "=" * 60)
-        print("DISPATCHER SCHEDULING E2E TEST SUMMARY")
+        print("CONTROLLER SCHEDULING E2E TEST SUMMARY")
         print("=" * 60)
 
         minio_objects = list(minio_client.list_objects(TEST_BUCKET, prefix=TEST_PREFIX))
@@ -712,13 +734,13 @@ class TestDispatcherScheduledDAG:
 
         print(f"\n  1. MinIO Source: {len(minio_objects)} files in s3://{TEST_BUCKET}/{TEST_PREFIX}")
         print(f"  2. MongoDB Dest: {mongo_count} documents in {TEST_COLLECTION}")
-        print(f"  3. Dispatcher DAG: {DISPATCHER_DAG_ID}")
+        print(f"  3. Controller DAG: {CONTROLLER_DAG_ID}")
         print(f"  4. Ondemand DAG: {ONDEMAND_DAG_ID}")
-        print(f"  5. Dispatcher Run: {TestDispatcherScheduledDAG.dispatcher_run_id}")
-        print(f"  6. Ondemand Run: {TestDispatcherScheduledDAG.ondemand_run_id}")
+        print(f"  5. Controller Run: {TestControllerScheduledDAG.controller_run_id}")
+        print(f"  6. Ondemand Run: {TestControllerScheduledDAG.ondemand_run_id}")
         print(f"  7. Integration ID: {seed_mysql['integration_id']}")
-        print(f"\n  Pipeline: Cron → Dispatcher → DB Query → Ondemand DAG → S3 → MongoDB")
-        print(f"\n  Full dispatcher scheduling pipeline is working!")
+        print(f"\n  Pipeline: Cron → Controller → DB Query → DTM → Ondemand DAG → S3 → MongoDB")
+        print(f"\n  Full controller scheduling pipeline is working!")
 
     # ------------------------------------------------------------------
     # Helpers

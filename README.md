@@ -9,7 +9,7 @@ A scalable Airflow-based system supporting multi-tenancy and event-driven archit
 - **Multi-tenancy**: Hundreds of tenants/customers, many DAG runs
 - **CDC-driven orchestration**: Debezium-triggered runs
 - **Workflow-based DAGs**: Each group of DAGs represents a use case (e.g., s3_to_mongo)
-- **Hybrid scheduling**: Airflow-native daily schedules + dispatcher-based weekly/monthly
+- **Hybrid scheduling**: Single Controller DAG with Dynamic Task Mapping dispatches all schedule types (daily/weekly/monthly)
 - **Reusable connectors**: S3, Azure, MongoDB, MySQL connectors shared across workflows
 - **Hotspot detection**: There's a limit to max_active_runs, this tries to anticipate potential ceilings for scheduled workflows/dags
 - **Operational safety**: DST handling, backfill control, worker-slot efficiency, distributed tracing without collector/persistence 
@@ -186,8 +186,8 @@ Reusable modules wrapping data source APIs:
 
 ### Airflow DAGs
 
-- **Scheduled DAGs**: [Dispatcher pattern](docs/DISPATCHER_PATTERN.md) — scheduled DAGs query the control plane DB for due integrations and trigger the ondemand DAG for each one. Each integration gets an isolated DAG run with full conf and IntegrationRun tracking. Daily has to be picked on the hour. Weekly and Monthly do not get to pick the hour.
-- **On-Demand DAG**: Triggered via API for CDC, manual replays, and backfills
+- **Controller DAG**: [Controller DAG pattern](docs/DISPATCHER_PATTERN.md) — a single `s3_to_mongo_controller` DAG runs every hour, queries the control plane DB for all due integrations (`utc_next_run <= now`), and dispatches each one via `TriggerDagRunOperator` with Dynamic Task Mapping (DTM). Replaces 26+ static dispatcher files with one DAG that handles daily, weekly, and monthly schedules uniformly.
+- **On-Demand DAG**: `s3_to_mongo_ondemand` — triggered by the controller (scheduled), Kafka consumer (CDC), or control plane API (manual). All trigger paths reuse the same pipeline: Prepare → Validate → Execute → Cleanup.
 
 ## Testing Strategy
 
@@ -198,7 +198,6 @@ Reusable modules wrapping data source APIs:
 
 ## TODO
 
-- Create remaining hourly dispatcher DAGs (daily_00 through daily_23) per workflow — only daily_02 and 03 exist as a working example
 - k8s setup/deployment are not verified
 - Busy-Time Mitigation in section 9.3 was not implemented
 

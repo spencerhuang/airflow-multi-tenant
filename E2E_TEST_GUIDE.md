@@ -436,6 +436,101 @@ git pull origin main
          └────────┘    └────────┘   └────────┘
 ```
 
+## Controller DAG Scheduling E2E Test
+
+**File:** `control_plane/tests/test_cron_scheduled_e2e.py`
+
+This test validates the full cron-scheduled pipeline through the Controller DAG pattern (DTM):
+
+```bash
+pytest control_plane/tests/test_cron_scheduled_e2e.py -v -s
+```
+
+### What It Tests
+
+```
+Cron Scheduler → Controller DAG → DB Query (utc_next_run <= now) → DTM → Ondemand DAG → S3 → MongoDB
+```
+
+### How It Runs Fast (~80s Instead of 1 Hour)
+
+The production Controller DAG runs every hour (`0 * * * *`). The test uses two tricks to compress the timeline:
+
+1. **Every-minute schedule**: The test deploys a separate DAG file (`s3_to_mongo_controller_e2e_test`) with `schedule="* * * * *"` instead of `"0 * * * *"`. The Airflow scheduler triggers it within ~60s.
+
+2. **Past-dated `utc_next_run`**: The test seeds the integration with `utc_next_run = datetime(2020, 1, 1)`. Since `2020-01-01` is always in the past, the controller's `WHERE utc_next_run <= now` query picks up the test integration on its very first run.
+
+### Test Steps (8 ordered tests)
+
+| Step | Test | What It Does |
+|------|------|-------------|
+| 1 | `test_01_upload_test_data` | Upload 3 JSON files to MinIO, verify MySQL seed |
+| 2 | `test_02_verify_dag_detected` | Deploy test controller DAG, force reserialize, verify API detects it |
+| 3 | `test_03_wait_for_controller_run` | Wait for Airflow scheduler to trigger the controller (~55s) |
+| 4 | `test_04_wait_for_controller_completion` | Wait for controller to find due integrations and dispatch |
+| 5 | `test_05_wait_for_ondemand_completion` | Wait for dispatched `s3_to_mongo_ondemand` to complete |
+| 6 | `test_06_verify_mongodb_data` | Verify 3 documents (Alice, Bob, Charlie) in MongoDB |
+| 7 | `test_07_verify_integration_run_created` | Verify IntegrationRun record in MySQL |
+| 8 | `test_08_summary` | Print full pipeline summary |
+
+### Test Flow
+
+```
+┌──────────────┐
+│   pytest     │  ← Step 1: Upload test JSON + seed MySQL
+└──────┬───────┘
+       │
+       ↓  Step 2: Write DAG file + reserialize
+┌──────────────┐
+│  dag-processor│  ← Parses test controller DAG (30s refresh)
+└──────┬───────┘
+       │
+       ↓  Step 3: Scheduler triggers controller (every minute)
+┌──────────────┐
+│  Controller  │  ← find_due_integrations()
+│  DAG (test)  │     WHERE utc_next_run <= now → finds test integration
+└──────┬───────┘
+       │
+       ↓  Step 4: TriggerDagRunOperator.expand_kwargs()
+┌──────────────┐
+│  Ondemand    │  ← Prepare → Validate → Execute → Cleanup
+│  DAG         │     S3 (MinIO) → MongoDB
+└──────┬───────┘
+       │
+       ↓  Steps 6-7: Verify results
+┌──────────────┐     ┌──────────────┐
+│   MongoDB    │     │    MySQL     │
+│  3 documents │     │ IntegrationRun│
+└──────────────┘     └──────────────┘
+```
+
+### Cleanup
+
+The test automatically cleans up all state:
+- Removes the test DAG file from `airflow/dags/`
+- Deletes the DAG and its runs from Airflow via API
+- Deletes test records from MySQL (integration, auths, access points, workspace, customer)
+- Drops the test MongoDB collection
+
+### Prerequisites
+
+Same as the main E2E test — Docker services must be running. The dag-processor must have `AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL=30` (configured in `docker-compose.yml`).
+
+### Typical Output
+
+```
+STEP 2: Controller DAG detected after ~0s (via reserialize)
+STEP 3: Found NEW controller run after ~55s
+STEP 4: Controller completed in ~5s
+STEP 5: Ondemand DAG completed
+STEP 6: Found 3 documents (Alice, Bob, Charlie)
+STEP 7: IntegrationRun found (dag_run_id contains workspace_id)
+
+8 passed in ~80s
+```
+
+---
+
 ## Next Steps
 
 1. **Extend to other workflows:**
@@ -461,13 +556,12 @@ git pull origin main
 
 ## Summary
 
-The E2E test now provides complete validation of the S3 to MongoDB data pipeline:
+The E2E tests provide complete validation of the S3 to MongoDB data pipeline through two trigger paths:
 
-✅ Real data upload to MinIO
-✅ Integration creation via API
-✅ DAG triggering via Airflow API
-✅ Actual data transfer (S3 → MongoDB)
-✅ Data verification in MongoDB
-✅ Comprehensive test reporting
+**Event-Driven E2E** (`test_s3_to_mongo_e2e.py`):
+- Kafka CDC event → Consumer → Airflow API → Ondemand DAG → S3 → MongoDB
 
-This ensures the entire stack works correctly from end to end!
+**Controller Scheduling E2E** (`test_cron_scheduled_e2e.py`):
+- Cron Scheduler → Controller DAG → DB Query (DTM) → Ondemand DAG → S3 → MongoDB
+
+Both tests verify actual data transfer from MinIO to MongoDB, IntegrationRun tracking in MySQL, and automatic cleanup of all test state.

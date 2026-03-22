@@ -792,7 +792,7 @@ This keeps the production image minimal (only adds ~3KB) while the JDK build too
 | `kafka_consumer/app/core/logging.py` | `JSONFormatter` emits `trace_id` field in structured logs |
 | `airflow/plugins/operators/base_operators.py` | `TraceIdMixin` — extracts traceparent from dag_run conf or XCom for all task operators |
 | `airflow/plugins/operators/s3_to_mongo_operators.py` | All tasks (Prepare/Validate/Execute/CleanUp) prefix logs with `[trace_id=...]` |
-| `airflow/plugins/operators/dispatch_operators.py` | `DispatchScheduledIntegrationsTask` generates a fresh traceparent for scheduler-triggered DAGs |
+| `airflow/plugins/operators/dispatch_operators.py` | `find_and_prepare_due_integrations()` generates a fresh traceparent for scheduler-triggered DAGs |
 
 ### Key Design Decisions
 
@@ -802,7 +802,7 @@ This keeps the production image minimal (only adds ~3KB) while the JDK build too
 
 3. **Two propagation paths into Airflow** — `dag_run.conf.traceparent` (set by Kafka consumer) is the primary path. `XCom` (pushed by PrepareTask) is the fallback for downstream tasks that can't access dag_run conf directly.
 
-4. **Scheduler-triggered DAGs get tracing too** — `DispatchScheduledIntegrationsTask` calls `TraceContext.new().traceparent` so scheduled runs (not triggered by Kafka) still have a trace_id for log correlation.
+4. **Scheduler-triggered DAGs get tracing too** — `find_and_prepare_due_integrations()` calls `TraceContext.new().traceparent` so scheduled runs (not triggered by Kafka) still have a trace_id for log correlation.
 
 5. **`CONNECT_PRODUCER_INTERCEPTOR_CLASSES` env var** — Kafka Connect applies the interceptor to all connectors in the cluster without modifying individual connector configs. One setting, all CDC topics get traceparent headers.
 
@@ -998,8 +998,80 @@ Opaque Secret with placeholder `stringData` for all infrastructure secrets. Inte
 
 ---
 
+## Controller DAG: Single Hourly Dispatcher with Dynamic Task Mapping
+
+### The Problem
+
+The previous architecture used static dispatcher DAGs — one per schedule hour (`s3_to_mongo_daily_02`, `s3_to_mongo_daily_03`, etc.) plus separate weekly and monthly DAGs. This required 26+ DAG files to cover all hours and schedule types, with each file duplicating the same query-and-trigger logic.
+
+### The Solution
+
+A single **Controller DAG** (`s3_to_mongo_controller`) runs every hour (`0 * * * *`) and uses Airflow's Dynamic Task Mapping (DTM) to dispatch all due integrations:
+
+```
+Phase A: @task find_due_integrations()
+  → Queries: WHERE utc_next_run <= now AND usr_sch_status = 'active'
+  → Builds conf dict per integration (same as control plane API / Kafka consumer)
+  → Advances utc_next_run to next cron occurrence
+  → Returns list[dict] with {conf, trigger_run_id}
+
+Phase B: TriggerDagRunOperator.partial(...).expand_kwargs(due)
+  → Fires one s3_to_mongo_ondemand DAG run per due integration
+  → wait_for_completion=False — controller finishes in seconds
+```
+
+### Key Design Decisions
+
+1. **`utc_next_run <= now` over cron-hour matching**: The `utc_next_run` column (maintained by croniter) serves as a universal "is due" check. Daily, weekly, and monthly schedules are handled by a single query — no per-schedule-type branching.
+
+2. **`utc_next_run` advanced in Phase A (before trigger)**: Phase B (`TriggerDagRunOperator`) is fire-and-forget with no callback. Advancing in Phase A before triggering means a Phase B failure could theoretically skip a run, but `catchup=False` + `utc_next_run <= now` means past-due integrations are naturally picked up on the next hourly run.
+
+3. **Native `TriggerDagRunOperator` over REST API**: Eliminates the need for `AIRFLOW_INTERNAL_API_URL` / username / password inside the dispatcher. More reliable (Airflow internal mechanism vs HTTP).
+
+4. **`determine_dag_id()` simplified**: All schedule types now resolve to `{workflow_name}_ondemand`. The per-hour DAG IDs (`_daily_02`, `_daily_14`, etc.) no longer exist.
+
+### Files Changed
+
+| File | Action |
+|------|--------|
+| `airflow/dags/s3_to_mongo_controller.py` | **Created** — single Controller DAG |
+| `airflow/plugins/operators/dispatch_operators.py` | **Refactored** — replaced `DispatchScheduledIntegrationsTask` class with `find_and_prepare_due_integrations()` function |
+| `packages/shared_utils/shared_utils/dag_trigger.py` | **Updated** — `determine_dag_id()` always returns `_ondemand` |
+| `airflow/dags/s3_to_mongo_daily_02.py` | **Deleted** |
+| `airflow/dags/s3_to_mongo_daily_03.py` | **Deleted** |
+| `airflow/dags/s3_to_mongo_weekly.py` | **Deleted** |
+| `airflow/dags/s3_to_mongo_monthly.py` | **Deleted** |
+
+### Three Trigger Paths (Unified)
+
+All paths target `s3_to_mongo_ondemand` and build identical conf dicts:
+
+| Trigger Source | When | Sample `dag_run_id` |
+|---|---|---|
+| Control plane API | On-demand / manual | `ws-abc_s3_to_mongo_ondemand_manual_20260310_183116_3` |
+| Kafka consumer | CDC event | `ws-abc_s3_to_mongo_ondemand_cdc_20260310_183335_2` |
+| Controller DAG | Hourly cron | `ws-abc_s3_to_mongo_ondemand_scheduled_20260310_204234_0` |
+
+### Test Coverage
+
+**Unit Tests** (`airflow/tests/test_s3_to_mongo_operators.py` — `TestFindAndPrepareDueIntegrations`):
+- Due integrations returned with correct confs
+- Future `utc_next_run` integrations excluded (empty result)
+- Error isolation (one fails, others continue)
+- Missing `CONTROL_PLANE_DB_URL` returns empty list
+- `trigger_run_id` format validated
+- `utc_next_run` advanced after dispatch
+- Advance failure does not break dispatch
+
+**E2E Test** (`control_plane/tests/test_cron_scheduled_e2e.py`):
+Full pipeline: Seed MySQL → Upload to MinIO → Deploy test controller DAG → Wait for scheduler → Verify MongoDB data → Verify IntegrationRun record. See [E2E_TEST_GUIDE.md](E2E_TEST_GUIDE.md) for details.
+
+---
+
 ## Summary
 
 **Kafka Consumer Service**: Standalone FastAPI microservice (port 8001) — scales independently, Kafka consumer group rebalancing, health endpoints, modern lifespan management, direct MySQL via pymysql, Core tables (no ORM dependency).
+
+**Controller DAG**: Single hourly dispatcher using DTM — replaces 26+ static DAG files with one Controller DAG that queries `utc_next_run <= now` and fires `TriggerDagRunOperator.expand_kwargs()` for all due integrations.
 
 **Security Overhaul**: Unified secret provider (file/env/default), Fernet encryption via Docker secrets, Redis transient credential vault (30-min TTL, atomic SETEX, adaptive TLS), customer credentials removed from XCom/metadata DB, all hardcoded passwords replaced with env var substitution.
