@@ -1,7 +1,10 @@
 version: '3.8'
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:3.0.6-python3.11
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.airflow
+  image: airflow-multi-tenant:local
   entrypoint: ["/opt/airflow/entrypoint-secrets.sh"]
   networks:
     - backend-net
@@ -23,7 +26,6 @@ x-airflow-common: &airflow-common
     # Airflow 3: Bundle refresh interval (seconds) for dag-processor to detect new DAG files
     AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: '30'
     PYTHONPATH: /opt/airflow
-    _PIP_ADDITIONAL_REQUIREMENTS: 'boto3 pymongo pymysql apache-airflow-providers-fab redis>=5.0.0 kafka-python'
     CONTROL_PLANE_DB_URL: 'mysql+pymysql://${MYSQL_USER:-control_plane}:${MYSQL_PASSWORD:-control_plane}@mysql:3306/${MYSQL_DATABASE:-control_plane}'
     # Airflow internal API (for dispatcher tasks that self-trigger DAGs)
     AIRFLOW_INTERNAL_API_URL: 'http://airflow-apiserver:8080/api/v2'
@@ -369,7 +371,7 @@ services:
         mkdir -p /sources/logs /sources/dags /sources/plugins
         chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
         /entrypoint airflow db migrate
-        airflow users create \
+        /entrypoint airflow users create \
           --username ${AIRFLOW_USERNAME:-airflow} \
           --firstname Airflow \
           --lastname Admin \
