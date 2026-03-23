@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-03-23
+
+### Added
+- **Audit service** — New standalone microservice that consumes audit events from Kafka and writes to per-customer MySQL schemas with automatic schema provisioning (06905f6).
+- `audit_producer` shared utility — Publishes structured audit events (integration CRUD, DAG lifecycle) to Kafka `audit.events` topic with PII masking.
+- `audit_listener` Airflow plugin — Listens to DAG/task lifecycle events (on_dag_run_running, on_task_instance_success/failed) and emits audit events via `audit_producer`.
+- `schema_manager` for audit service — Auto-provisions per-customer `audit_<customer_guid>` schemas on first event.
+- Audit query API (`GET /api/v1/audit/{customer_guid}`) with filtering by event type, integration ID, and date range.
+- `Dockerfile.audit-service` and audit service added to Docker Compose.
+- Kafka topic auto-creation script (`kafka-create-topics.sh`).
+- `AuditLog` shared model added to `shared_models`.
+- Unit tests for audit masking and schema manager.
+
+### Changed
+- **Airflow upgraded from 3.0.6 to 3.1.8** — Unifies all services on SQLAlchemy 2.0; eliminates the `<2.0` constraint that was pinning the Airflow requirements file (29ecc08).
+- SQLAlchemy unified to 2.0.48 across all requirement files (main, control-plane, kafka-consumer, test, audit-service).
+- FastAPI pinned to 0.117.0 across all services for Airflow 3.1 compatibility.
+- Custom Airflow Docker image (`Dockerfile.airflow`) to bundle shared packages and plugins.
+- Control plane `integrations` API enriched with audit event publishing on create/update/delete.
+- Control plane middleware now extracts `customer_guid` for audit context.
+- Shared packages (`shared_models`, `shared_utils`) bumped to 0.1.5.
+- Documentation reorganised — renamed `SAFETY_AUDIT.md` → `OPERATIONAL_SAFETY_CHECK.md`, `COMPLIANCE_AUDIT.md` → `SPEC_COMPLIANCE_CHECK.md` (2eee3bb).
+- Kafka consumer service publishes audit events on CDC processing.
+
+### Fixed
+- Lock files regenerated for Airflow 3.1.8 dependency tree.
+
 ## [0.1.4] - 2026-03-22
 
 ### Security
@@ -94,3 +121,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.1.2]: https://github.com/spencerhuang/airflow-multi-tenant/releases/tag/v0.1.2
 [0.1.3]: https://github.com/spencerhuang/airflow-multi-tenant/releases/tag/v0.1.3
 [0.1.4]: https://github.com/spencerhuang/airflow-multi-tenant/releases/tag/v0.1.4
+[0.1.5]: https://github.com/spencerhuang/airflow-multi-tenant/releases/tag/v0.1.5
