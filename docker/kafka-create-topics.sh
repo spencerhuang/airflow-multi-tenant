@@ -53,6 +53,18 @@ kafka-topics --create \
 
 echo "✓ Created topic: test.cdc.integration.events"
 
+# Create audit events topic (6 partitions for customer_guid-based partitioning)
+kafka-topics --create \
+    --bootstrap-server $KAFKA_BROKER \
+    --topic audit.events \
+    --partitions 6 \
+    --replication-factor $REPLICATION_FACTOR \
+    --config retention.ms=604800000 \
+    --config cleanup.policy=delete \
+    --if-not-exists
+
+echo "✓ Created topic: audit.events"
+
 # List all topics
 echo ""
 echo "All Kafka topics:"
@@ -65,3 +77,4 @@ echo "Topic details:"
 echo "  - cdc.integration.events (retention: 7 days)"
 echo "  - cdc.integration.events.dlq (retention: 30 days)"
 echo "  - test.cdc.integration.events (retention: 1 day)"
+echo "  - audit.events (retention: 7 days, 6 partitions)"

@@ -1,0 +1,39 @@
+FROM python:3.11-slim
+
+LABEL org.opencontainers.image.title="airflow-multi-tenant-audit-service"
+LABEL org.opencontainers.image.version="0.1.0"
+LABEL org.opencontainers.image.description="Audit service for multi-tenant Airflow — consumes audit events from Kafka"
+LABEL org.opencontainers.image.licenses="MIT"
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    default-libmysqlclient-dev \
+    pkg-config \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv for fast dependency installation
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# Copy requirements and install dependencies
+COPY requirements-audit-service.txt /app/
+RUN uv pip install --system --no-cache-dir -r /app/requirements-audit-service.txt
+
+# Copy shared packages (single source of truth for models and utilities)
+COPY packages/shared_models/shared_models /app/shared_models
+COPY packages/shared_utils/shared_utils /app/shared_utils
+
+# Copy application code
+COPY audit_service /app/audit_service
+
+# Set Python path
+ENV PYTHONPATH=/app
+
+# Expose port
+EXPOSE 8002
+
+# Run the application
+CMD ["uvicorn", "audit_service.app.main:app", "--host", "0.0.0.0", "--port", "8002"]

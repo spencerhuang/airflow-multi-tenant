@@ -3,6 +3,8 @@ version: '3.8'
 x-airflow-common: &airflow-common
   image: apache/airflow:3.0.6-python3.11
   entrypoint: ["/opt/airflow/entrypoint-secrets.sh"]
+  networks:
+    - backend-net
   environment: &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres-airflow/${POSTGRES_DB:-airflow}
@@ -21,12 +23,14 @@ x-airflow-common: &airflow-common
     # Airflow 3: Bundle refresh interval (seconds) for dag-processor to detect new DAG files
     AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: '30'
     PYTHONPATH: /opt/airflow
-    _PIP_ADDITIONAL_REQUIREMENTS: 'boto3 pymongo pymysql apache-airflow-providers-fab redis>=5.0.0'
+    _PIP_ADDITIONAL_REQUIREMENTS: 'boto3 pymongo pymysql apache-airflow-providers-fab redis>=5.0.0 kafka-python'
     CONTROL_PLANE_DB_URL: 'mysql+pymysql://${MYSQL_USER:-control_plane}:${MYSQL_PASSWORD:-control_plane}@mysql:3306/${MYSQL_DATABASE:-control_plane}'
     # Airflow internal API (for dispatcher tasks that self-trigger DAGs)
     AIRFLOW_INTERNAL_API_URL: 'http://airflow-apiserver:8080/api/v2'
     AIRFLOW_USERNAME: '${AIRFLOW_USERNAME:-airflow}'
     AIRFLOW_PASSWORD: '${AIRFLOW_PASSWORD:-airflow}'
+    # Kafka (for audit event production)
+    KAFKA_BOOTSTRAP_SERVERS: 'kafka:29092'
     # Redis (transient credential vault)
     REDIS_HOST: redis
     REDIS_PORT: '6379'
@@ -55,6 +59,8 @@ services:
   mysql:
     image: mysql:8.0
     container_name: control-plane-mysql
+    networks:
+      - backend-net
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-control_plane}
@@ -71,11 +77,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: always
 
   # PostgreSQL Database for Airflow
   postgres-airflow:
     image: postgres:15
     container_name: airflow-postgres
+    networks:
+      - backend-net
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-airflow}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
@@ -89,11 +98,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: always
 
   # MongoDB
   mongodb:
     image: mongo:7.0
     container_name: mongodb
+    networks:
+      - backend-net
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-root}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-root}
@@ -108,12 +120,15 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: always
 
   # MinIO (S3-compatible object storage)
   minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     container_name: minio
     command: server /data --console-address ":9001"
+    networks:
+      - backend-net
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
@@ -127,11 +142,14 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: always
 
   # Redis (transient credential vault for Airflow tasks)
   redis:
     image: redis:7-alpine
     container_name: redis
+    networks:
+      - backend-net
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-changeme_redis}"]
     ports:
       - "6379:6379"
@@ -140,6 +158,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: always
     volumes:
       - redis-data:/data
 
@@ -148,6 +167,8 @@ services:
     image: confluentinc/cp-zookeeper:7.5.0
     platform: linux/amd64
     container_name: zookeeper
+    networks:
+      - backend-net
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -158,6 +179,7 @@ services:
           test: ["CMD", "true"]
           interval: 5s
           retries: 1
+    restart: always
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     platform: linux/amd64
@@ -170,10 +192,16 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # INTERNAL: container-to-container (kafka:29092)
+      # EXTERNAL: host machine (localhost:9092)
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      backend-net:
+        aliases:
+          - kafka-broker
     volumes:
       - ./docker/kafka-create-topics.sh:/docker/kafka-create-topics.sh:ro
     healthcheck:
@@ -182,6 +210,7 @@ services:
       timeout: 10s
       retries: 10
       start_period: 30s
+    restart: always
 
   # Kafka Connect (for Debezium CDC)
   kafka-connect:
@@ -198,9 +227,12 @@ services:
         condition: service_healthy
     ports:
       - "8083:8083"
+    networks:
+      - backend-net
     environment:
       BOOTSTRAP_SERVERS: kafka:29092
       GROUP_ID: debezium-cluster
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
       KAFKA_HEAP_OPTS: "-Xmx768m -Xms256m"
       CONFIG_STORAGE_TOPIC: connect_configs
       OFFSET_STORAGE_TOPIC: connect_offsets
@@ -215,6 +247,7 @@ services:
       # headers into every Kafka message produced by Debezium CDC.
       # Zero OTEL SDK dependencies — just generates trace_id + span_id.
       CONNECT_PRODUCER_INTERCEPTOR_CLASSES: io.debezium.tracing.TraceparentInterceptor
+    restart: always
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8083/connectors" ]
       interval: 15s
@@ -226,6 +259,8 @@ services:
   kafka-ui:
     image: provectuslabs/kafka-ui:v0.7.2
     container_name: kafka-ui
+    networks:
+      - backend-net
     depends_on:
       - kafka
       - kafka-connect
@@ -244,6 +279,8 @@ services:
     image: debezium/debezium-ui:2.5
     platform: linux/amd64
     container_name: debezium-ui
+    networks:
+      - backend-net
     depends_on:
       - kafka-connect
     ports:
@@ -256,6 +293,8 @@ services:
   debezium-register:
     image: python:3.11-slim
     container_name: debezium-register
+    networks:
+      - backend-net
     depends_on:
       kafka-connect:
         condition: service_healthy
@@ -347,12 +386,14 @@ services:
     volumes:
       - ./airflow:/sources
 
-  # Control Plane Service (stateless REST API — no Kafka dependency)
+  # Control Plane Service (stateless REST API + audit producer)
   control-plane:
     build:
       context: .
       dockerfile: docker/Dockerfile.control-plane
     container_name: control-plane-service
+    networks:
+      - backend-net
     command: >
       sh -c "cd control_plane &&
              python -m alembic upgrade head &&
@@ -362,6 +403,7 @@ services:
       AIRFLOW_API_URL: http://airflow-apiserver:8080/api/v2
       AIRFLOW_USERNAME: '${AIRFLOW_USERNAME:-airflow}'
       AIRFLOW_PASSWORD: '${AIRFLOW_PASSWORD:-airflow}'
+      KAFKA_BOOTSTRAP_SERVERS: 'kafka:29092'
     ports:
       - "8000:8000"
     depends_on:
@@ -380,6 +422,8 @@ services:
       context: .
       dockerfile: docker/Dockerfile.kafka-consumer
     container_name: kafka-consumer-service
+    networks:
+      - backend-net
     command: >
       uvicorn kafka_consumer.app.main:app --host 0.0.0.0 --port 8001 --reload
     environment:
@@ -407,6 +451,41 @@ services:
       - ./packages/shared_models/shared_models:/app/shared_models
       - ./packages/shared_utils/shared_utils:/app/shared_utils
 
+  # Audit Service (consumes audit events from Kafka, writes to per-customer MySQL schemas)
+  audit-service:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.audit-service
+    container_name: audit-service
+    networks:
+      - backend-net
+    command: >
+      uvicorn audit_service.app.main:app --host 0.0.0.0 --port 8002 --reload
+    environment:
+      DATABASE_URL: mysql+pymysql://${AUDIT_MYSQL_USER:-audit_svc}:${AUDIT_MYSQL_PASSWORD:-audit_svc}@mysql:3306/audit_template
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: audit.events
+      KAFKA_CONSUMER_GROUP: audit-consumer
+      LOG_LEVEL: INFO
+    ports:
+      - "8002:8002"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - ./audit_service:/app/audit_service
+      - ./packages/shared_models/shared_models:/app/shared_models
+      - ./packages/shared_utils/shared_utils:/app/shared_utils
+
 secrets:
   fernet_key:
     file: ./docker/secrets/fernet_key
@@ -420,3 +499,8 @@ volumes:
   minio-data:
   redis-data:
   airflow-logs:
+
+networks:
+  backend-net:
+    driver: bridge
+    name: airflow-kafka-stack

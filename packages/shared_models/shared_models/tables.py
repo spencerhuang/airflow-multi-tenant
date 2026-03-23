@@ -20,6 +20,7 @@ from sqlalchemy import (
     MetaData,
     Table,
     Column,
+    Index,
     Integer,
     String,
     DateTime,
@@ -190,4 +191,36 @@ dead_letter_messages = Table(
     Column("resolved_at", DateTime, nullable=True),
     Column("created_at", DateTime, default=_utcnow, nullable=False),
     Column("updated_at", DateTime, default=_utcnow, onupdate=_utcnow, nullable=False),
+)
+
+# ── audit_events (template DDL — used by audit_template schema) ─────────
+# No customer_guid column: the schema IS the tenant boundary.
+# This table definition is used by AuditSchemaManager to create per-customer
+# schemas via CREATE TABLE LIKE, not auto-created by alembic.
+
+audit_metadata = MetaData()
+
+audit_events = Table(
+    "audit_events",
+    audit_metadata,
+    Column("event_id", String(36), primary_key=True),
+    Column("timestamp", DateTime, nullable=False),
+    Column("event_type", String(100), nullable=False),
+    Column("actor_id", String(255), nullable=False),
+    Column("actor_type", String(50), nullable=False),
+    Column("actor_ip", String(45), nullable=True),
+    Column("resource_type", String(100), nullable=False),
+    Column("resource_id", String(255), nullable=False),
+    Column("action", String(100), nullable=False),
+    Column("outcome", String(20), nullable=False),
+    Column("before_state", Text, nullable=True),
+    Column("after_state", Text, nullable=True),
+    Column("trace_id", String(64), nullable=True),
+    Column("request_id", String(36), nullable=True),
+    Column("metadata_json", Text, nullable=True),
+    Index("idx_audit_event_type", "event_type"),
+    Index("idx_audit_timestamp", "timestamp"),
+    Index("idx_audit_resource", "resource_type", "resource_id"),
+    Index("idx_audit_actor", "actor_id"),
+    Index("idx_audit_trace", "trace_id"),
 )

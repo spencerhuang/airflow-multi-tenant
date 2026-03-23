@@ -1,14 +1,17 @@
 """
-Middleware for structured error logging.
+Middleware for structured error logging and audit context.
 Captures all HTTP requests/responses and logs errors with full context.
 """
 import logging
 import time
 import traceback
+import uuid
 from typing import Callable
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
+
+from shared_utils.trace_context import TraceContext
 
 logger = logging.getLogger(__name__)
 
@@ -80,3 +83,37 @@ class ErrorLoggingMiddleware(BaseHTTPMiddleware):
             
             # Re-raise to let FastAPI handle the response
             raise
+
+
+class AuditContextMiddleware(BaseHTTPMiddleware):
+    """Captures audit context (actor, IP, trace_id, request_id) for each request.
+
+    Stores values in ``request.state`` so downstream services can include
+    them in audit events without threading context manually.
+    """
+
+    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+        # Actor
+        actor_id = "anonymous"
+        actor_type = "user"
+        if hasattr(request.state, "user"):
+            actor_id = getattr(request.state.user, "username", None) or "anonymous"
+
+        # Client IP (respect X-Forwarded-For for proxied requests)
+        forwarded = request.headers.get("x-forwarded-for")
+        client_ip = forwarded.split(",")[0].strip() if forwarded else (
+            request.client.host if request.client else None
+        )
+
+        # Trace context
+        trace_ctx = TraceContext.new()
+        request_id = str(uuid.uuid4())
+
+        request.state.audit_actor_id = actor_id
+        request.state.audit_actor_type = actor_type
+        request.state.audit_actor_ip = client_ip
+        request.state.audit_trace_id = trace_ctx.trace_id
+        request.state.audit_request_id = request_id
+
+        response = await call_next(request)
+        return response

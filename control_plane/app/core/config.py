@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     MONGO_USERNAME: Optional[str] = None
     MONGO_PASSWORD: Optional[str] = None
 
+    # Kafka (for audit event production)
+    KAFKA_BOOTSTRAP_SERVERS: str = ""
+
     # OpenTelemetry
     OTEL_ENABLED: bool = True
     OTEL_SERVICE_NAME: str = "control-plane-service"

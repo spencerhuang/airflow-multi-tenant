@@ -17,6 +17,7 @@ from sqlalchemy import select, update
 
 from config.airflow_config import get_control_plane_config
 from shared_models.tables import integrations as integrations_table
+from shared_models.tables import workspaces as workspaces_table
 from shared_utils import (
     create_control_plane_engine,
     TraceContext,
@@ -105,11 +106,16 @@ def _find_due_integrations(engine, integration_type: str, now_utc: datetime):
     A single unified query replaces the old per-schedule-type approach.
     Covers daily, weekly, and monthly schedules — any integration whose
     utc_next_run has passed is considered due.
+
+    JOINs workspaces to include customer_guid for audit trail routing.
     """
     t = integrations_table
+    w = workspaces_table
     with engine.connect() as conn:
         return conn.execute(
-            select(t).where(
+            select(t, w.c.customer_guid)
+            .join(w, t.c.workspace_id == w.c.workspace_id)
+            .where(
                 t.c.usr_sch_status == "active",
                 t.c.integration_type == integration_type,
                 t.c.schedule_type.in_(["daily", "weekly", "monthly"]),
@@ -123,6 +129,7 @@ def _build_conf(engine, row) -> Dict[str, Any]:
     """Build DAG run conf using shared utilities."""
     conf = build_integration_conf(row)
     conf["traceparent"] = TraceContext.new().traceparent
+    conf["customer_guid"] = getattr(row, "customer_guid", "unknown")
     merge_json_data(conf, row.json_data, log=logger)
     auth_creds = resolve_auth_credentials_sync(engine, row.workspace_id, log=logger)
     conf.update(auth_creds)

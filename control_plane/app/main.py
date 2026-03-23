@@ -8,7 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from control_plane.app.core.config import settings
 from control_plane.app.core.database import engine, Base
 from control_plane.app.core.logging import setup_logging
-from control_plane.app.core.middleware import ErrorLoggingMiddleware
+from control_plane.app.core.middleware import ErrorLoggingMiddleware, AuditContextMiddleware
+from shared_utils.audit_producer import get_audit_producer
 from control_plane.app.api import api_router
 
 # Setup logging before creating the app
@@ -37,6 +38,14 @@ app.add_middleware(
 
 # Add error logging middleware
 app.add_middleware(ErrorLoggingMiddleware)
+
+# Add audit context middleware (captures actor, IP, trace_id per request)
+app.add_middleware(AuditContextMiddleware)
+
+# Initialise audit producer (fire-and-forget to Kafka)
+app.state.audit_producer = get_audit_producer(
+    bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
+)
 
 # Include API router
 app.include_router(api_router, prefix=settings.API_V1_STR)

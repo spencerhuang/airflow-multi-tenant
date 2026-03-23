@@ -21,6 +21,9 @@ enforce_gtid_consistency = ON
 max_connections = 200
 innodb_buffer_pool_size = 256M
 
+# Authentication (pymysql and many GUI clients require mysql_native_password)
+default_authentication_plugin = mysql_native_password
+
 # Character set
 character-set-server = utf8mb4
 collation-server = utf8mb4_unicode_ci

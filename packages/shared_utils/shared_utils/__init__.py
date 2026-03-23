@@ -42,6 +42,15 @@ try:
 except ImportError:
     pass
 
+# Audit producer is optional — requires kafka-python.
+try:
+    from shared_utils.audit_producer import (
+        AuditProducer,
+        get_audit_producer,
+    )
+except ImportError:
+    pass
+
 __all__ = [
     "TimezoneConverter",
     "get_airflow_auth_headers",
@@ -71,4 +80,6 @@ __all__ = [
     "fetch_credentials",
     "delete_credentials",
     "CREDENTIAL_TTL_SECONDS",
+    "AuditProducer",
+    "get_audit_producer",
 ]

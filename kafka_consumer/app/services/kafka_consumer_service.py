@@ -11,8 +11,29 @@ from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaError
 
 from kafka_consumer.app.core.config import settings
+from shared_utils.audit_producer import get_audit_producer
 
 logger = logging.getLogger(__name__)
+
+# Lazy-init audit producer for the kafka consumer service
+_audit_producer = None
+_audit_producer_init = False
+
+
+def _get_audit_producer():
+    """Lazy singleton for audit producer."""
+    global _audit_producer, _audit_producer_init
+    if _audit_producer_init:
+        return _audit_producer
+    _audit_producer_init = True
+    try:
+        _audit_producer = get_audit_producer(
+            bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
+        )
+    except Exception:
+        logger.exception("Failed to init audit producer in kafka consumer")
+        _audit_producer = None
+    return _audit_producer
 
 
 class MessageRetryTracker:
@@ -197,6 +218,29 @@ class KafkaConsumerService:
 
         except Exception as e:
             logger.error(f"Failed to send message to Kafka DLQ: {e}", exc_info=True)
+
+        # Emit audit event for dead-lettered message
+        try:
+            audit = _get_audit_producer()
+            if audit:
+                audit.emit(
+                    customer_guid="unknown",
+                    event_type="message.dead_lettered",
+                    actor_id="kafka-consumer",
+                    actor_type="system",
+                    resource_type="message",
+                    resource_id=message_key,
+                    action="dead_letter",
+                    outcome="failure",
+                    metadata={
+                        "error_type": type(error).__name__,
+                        "error_message": str(error)[:500],
+                        "retry_count": retry_count,
+                        "source_topic": self.topic,
+                    },
+                )
+        except Exception:
+            logger.debug("Failed to emit audit event for DLQ", exc_info=True)
 
         # Reset retry counter
         self.retry_tracker.reset_retry(message_key)
@@ -689,6 +733,29 @@ class KafkaConsumerService:
                 f"Workflow triggered successfully for integration {integration_id}",
                 extra={"dag_run_id": dag_run_id, "dag_id": dag_id, "trace_id": trace_id},
             )
+
+            # Emit audit event for CDC-triggered integration
+            try:
+                audit = _get_audit_producer()
+                if audit:
+                    audit.emit(
+                        customer_guid=conf.get("tenant_id", "unknown"),
+                        event_type="integration.cdc_triggered",
+                        actor_id="kafka-consumer",
+                        actor_type="system",
+                        resource_type="integration",
+                        resource_id=str(integration_id),
+                        action="trigger",
+                        outcome="success",
+                        trace_id=trace_id,
+                        metadata={
+                            "dag_id": dag_id,
+                            "dag_run_id": dag_run_id,
+                            "trigger_source": "cdc",
+                        },
+                    )
+            except Exception:
+                logger.debug("Failed to emit audit event for CDC trigger", exc_info=True)
 
         except Exception as e:
             logger.error(

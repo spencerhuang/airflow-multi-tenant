@@ -10,6 +10,8 @@ from shared_models.tables import (
     integrations,
     integration_runs,
     integration_run_errors,
+    audit_metadata,
+    audit_events,
 )
 
 __all__ = [
@@ -22,4 +24,6 @@ __all__ = [
     "integrations",
     "integration_runs",
     "integration_run_errors",
+    "audit_metadata",
+    "audit_events",
 ]

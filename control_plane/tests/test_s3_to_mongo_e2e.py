@@ -68,6 +68,7 @@ MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "minioadmin")
 MONGO_HOST = os.environ.get("MONGO_HOST", "localhost")
 MONGO_PORT = int(os.environ.get("MONGO_PORT", 27017))
 DATABASE_URL = os.environ.get("DATABASE_URL", "mysql+pymysql://control_plane:control_plane@localhost:3306/control_plane")
+AUDIT_DATABASE_URL = os.environ.get("AUDIT_DATABASE_URL", "mysql+pymysql://audit_svc:audit_svc@localhost:3306/information_schema")
 KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 KAFKA_TOPIC = os.environ.get("KAFKA_TOPIC", "cdc.integration.events")
 AIRFLOW_API_URL = os.environ.get("AIRFLOW_API_URL", "http://localhost:8080/api/v2")
@@ -261,6 +262,22 @@ def setup_database(wait_for_services):
         # Clean up stale Airflow DAG runs from previous test sessions
         _cleanup_airflow_dag_runs("s3_to_mongo_ondemand", "test-e2e-")
 
+        # Clean up stale audit schemas from previous test sessions
+        try:
+            audit_engine = create_engine(AUDIT_DATABASE_URL)
+            with audit_engine.begin() as conn:
+                result = conn.execute(text(
+                    "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA "
+                    "WHERE SCHEMA_NAME LIKE 'audit_test_e2e_%' "
+                    "OR SCHEMA_NAME LIKE 'audit_e2e_test_%'"
+                ))
+                for (schema_name,) in result:
+                    conn.execute(text(f"DROP SCHEMA IF EXISTS `{schema_name}`"))
+                    print(f"✓ Dropped stale audit schema: {schema_name}")
+            audit_engine.dispose()
+        except Exception as e:
+            print(f"Audit schema pre-cleanup warning: {e}")
+
         # Create test data
         customer = Customer(customer_guid=TEST_CUSTOMER_GUID, name="E2E Test Customer", max_integration=100)
         db.add(customer)
@@ -338,6 +355,24 @@ def setup_database(wait_for_services):
                 conn.execute(text("DELETE FROM auths WHERE workspace_id LIKE 'test-e2e-%'"))
                 conn.execute(text("DELETE FROM workspaces WHERE workspace_id LIKE 'test-e2e-%'"))
                 conn.execute(text("DELETE FROM customers WHERE customer_guid LIKE 'test-e2e-%'"))
+
+            # Clean up auto-provisioned audit schemas from this and previous test runs.
+            # Uses audit_svc credentials since control_plane doesn't have DROP on audit schemas.
+            try:
+                audit_engine = create_engine(AUDIT_DATABASE_URL)
+                with audit_engine.begin() as conn:
+                    result = conn.execute(text(
+                        "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA "
+                        "WHERE SCHEMA_NAME LIKE 'audit_test_e2e_%' "
+                        "OR SCHEMA_NAME LIKE 'audit_e2e_test_%'"
+                    ))
+                    for (schema_name,) in result:
+                        conn.execute(text(f"DROP SCHEMA IF EXISTS `{schema_name}`"))
+                        print(f"✓ Dropped audit schema: {schema_name}")
+                audit_engine.dispose()
+            except Exception as e:
+                print(f"Audit schema cleanup warning: {e}")
+
             print("✓ Cleanup completed successfully")
         except Exception as e:
             print(f"Cleanup error: {e}")
