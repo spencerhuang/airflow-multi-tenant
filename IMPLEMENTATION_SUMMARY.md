@@ -352,6 +352,22 @@ pytest control_plane/tests/test_cdc_kafka.py -v -s
 8. **docker/Dockerfile.kafka-consumer** — Container image for the consumer service
 9. **requirements-kafka-consumer.txt** — Minimal dependencies
 
+### Audit Service (New)
+
+1. **audit_service/app/main.py** — FastAPI app with Kafka consumer lifecycle
+2. **audit_service/app/core/config.py** — Configuration (DATABASE_URL, Kafka settings)
+3. **audit_service/app/services/audit_consumer.py** — Kafka consumer with sensitive data masking
+4. **audit_service/app/services/schema_manager.py** — Schema-per-customer provisioning and cache
+5. **audit_service/app/api/audit.py** — Query API (`GET /audit/{customer_guid}/events`)
+6. **audit_service/tests/test_schema_manager.py** — Schema manager unit tests
+7. **audit_service/tests/test_audit_masking.py** — Sensitive data masking tests
+8. **packages/shared_utils/shared_utils/audit_producer.py** — Threaded Kafka audit producer
+9. **packages/shared_utils/tests/test_audit_producer.py** — Audit producer unit tests
+10. **docker/Dockerfile.audit-service** — Container image
+11. **requirements-audit-service.txt** — Dependencies
+12. **docker/mysql-init.sql** — Added `audit_svc` user and `audit_template` schema
+13. **docs/audit-trail-design.md** — Full design document (GDPR/SOC 2 compliance)
+
 ### Control Plane (Modified)
 
 1. **control_plane/app/main.py** — Removed Kafka consumer lifecycle (now pure REST API)
@@ -367,6 +383,43 @@ pytest control_plane/tests/test_cdc_kafka.py -v -s
 
 1. **README.md** — Updated architecture, project structure, service access
 2. **IMPLEMENTATION_SUMMARY.md** (this file) — Updated to reflect standalone architecture
+
+## Audit Trail Service ✅
+
+**Design Document**: [docs/AUDIT-TRAIL-DESIGN.md](docs/AUDIT-TRAIL-DESIGN.md)
+
+A standalone FastAPI microservice (port 8002) that provides a GDPR-compliant, per-customer audit trail across all three services (Control Plane, Kafka Consumer, Airflow).
+
+### Architecture
+
+```
+Control Plane ─┐
+Kafka Consumer ─┼──→ Kafka (audit.events) ──→ Audit Consumer ──→ MySQL (schema-per-customer)
+Airflow DAGs  ─┘                                                    audit_{customer_guid}
+```
+
+All audit producers use a shared `AuditProducer` (threaded, fire-and-forget, never blocks the caller) from `shared_utils`. The Audit Service consumes events, auto-provisions a schema for each customer on first event, and persists the audit record.
+
+### Key Components
+
+| Component | File | Purpose |
+|---|---|---|
+| AuditProducer | `packages/shared_utils/shared_utils/audit_producer.py` | Threaded Kafka producer; fire-and-forget with bounded queue |
+| AuditConsumer | `audit_service/app/services/audit_consumer.py` | Kafka consumer; masks sensitive data, writes to per-customer schema |
+| AuditSchemaManager | `audit_service/app/services/schema_manager.py` | Schema-per-customer provisioning via `CREATE TABLE LIKE audit_template.audit_events` |
+| Query API | `audit_service/app/api/audit.py` | `GET /audit/{customer_guid}/events` with filtering |
+| Sensitive data masking | `audit_service/app/services/audit_consumer.py` | Redacts passwords, tokens, keys, credentials before persistence |
+
+### Storage Isolation
+
+Each customer gets an isolated MySQL schema (`audit_{customer_guid}`) cloned from `audit_template`. The `audit_svc` MySQL user has `SELECT, INSERT, UPDATE, DELETE, CREATE, DROP ON *.*` to support dynamic schema provisioning. GDPR Article 17 erasure is a single `DROP SCHEMA`.
+
+### Test Coverage
+
+- **20 unit tests** in `audit_service/tests/` (schema manager, sensitive data masking)
+- **10 unit tests** in `packages/shared_utils/tests/` (audit producer, NoOp fallback, queue behavior)
+
+---
 
 ## Key Benefits
 

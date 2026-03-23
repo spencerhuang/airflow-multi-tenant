@@ -12,7 +12,8 @@ A scalable Airflow-based system supporting multi-tenancy and event-driven archit
 - **Hybrid scheduling**: Single Controller DAG with Dynamic Task Mapping dispatches all schedule types (daily/weekly/monthly)
 - **Reusable connectors**: S3, Azure, MongoDB, MySQL connectors shared across workflows
 - **Hotspot detection**: There's a limit to max_active_runs, this tries to anticipate potential ceilings for scheduled workflows/dags
-- **Operational safety**: DST handling, backfill control, worker-slot efficiency, distributed tracing without collector/persistence 
+- **Operational safety**: DST handling, backfill control, worker-slot efficiency, distributed tracing without collector/persistence
+- **Audit trail**: Per-customer audit logging via Kafka with schema-per-tenant isolation, sensitive data masking, and GDPR/SOC 2 alignment — see [Audit Trail Design](docs/AUDIT-TRAIL-DESIGN.md)
 
 ## Product/Business statement
 
@@ -45,15 +46,18 @@ Managed Airflow providers (Astronomer, MWAA, Cloud Composer) solve multi-tenancy
 
 ```
 Control Plane Service (REST API, port 8000)
- |
- v
+ |                                    \
+ v                                     \---> audit.events topic
 Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Kafka Consumer Service (standalone, port 8001)
-                                                            |
-                                                            v
-                                                    Airflow REST API
-                                                            |
-                                                            v
-                                            Airflow Scheduler --> Workers
+                                            |                |
+                                            v                v
+                                   Audit Service        Airflow REST API
+                                   (port 8002)                |
+                                            |                v
+                                            v    Airflow Scheduler --> Workers
+                               MySQL (schema-per-customer)          |
+                                                                    v
+                                                             audit.events topic
 ```
 
 ## Project Structure
@@ -76,6 +80,12 @@ Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Kafka Consumer Service (sta
 │   │   ├── api/           # Health check endpoints (/health, /health/ready, /health/detailed)
 │   │   ├── services/      # KafkaConsumerService (CDC event processing, DAG triggering)
 │   │   └── core/          # Configuration, logging
+│   └── tests/
+├── audit_service/          # Audit trail service (Kafka consumer → per-customer MySQL schemas)
+│   ├── app/
+│   │   ├── api/           # Query endpoints (/audit/{customer_guid}/events)
+│   │   ├── services/      # AuditConsumer, AuditSchemaManager
+│   │   └── core/          # Configuration
 │   └── tests/
 ├── connectors/             # Reusable data source connectors
 │   ├── s3/
@@ -123,6 +133,7 @@ docker-compose up -d
 - Control Plane API: http://localhost:8000
 - API Documentation: http://localhost:8000/docs
 - Kafka Consumer Health: http://localhost:8001/health/detailed
+- Audit Service Health: http://localhost:8002/health
 
 ![Docker local](docs/Screenshot2026-02-04at10.56.10AM.png)
 
@@ -175,6 +186,16 @@ Standalone FastAPI microservice (port 8001) that:
 - Runs independently from the control plane for independent scaling and failover
 - Provides health endpoints: `/health`, `/health/ready`, `/health/detailed`
 - Supports Dead Letter Queue (DLQ) for poison pill handling
+
+### Audit Service
+
+Standalone FastAPI microservice (port 8002) that provides a per-customer audit trail:
+- Consumes `audit.events` from Kafka (produced by Control Plane and Airflow)
+- Schema-per-customer isolation (`audit_{customer_guid}`) with template-based provisioning
+- Sensitive data masking (passwords, tokens, keys redacted before persistence)
+- Query API: `GET /audit/{customer_guid}/events` with filtering by event type, date range, and actor
+- GDPR Article 17(3)(e) compliant retention; SOC 2 CC6.1/CC7.1/CC8.1 aligned
+- See [Audit Trail Design](docs/audit-trail-design.md) for the full design document
 
 ### Connectors
 
