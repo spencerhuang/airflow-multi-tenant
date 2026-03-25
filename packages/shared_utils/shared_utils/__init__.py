@@ -51,6 +51,12 @@ try:
 except ImportError:
     pass
 
+# DLQ utilities are optional — requires kafka-python + shared_models.
+try:
+    from shared_utils.dlq_utils import send_to_dlq
+except ImportError:
+    pass
+
 __all__ = [
     "TimezoneConverter",
     "get_airflow_auth_headers",
@@ -82,4 +88,5 @@ __all__ = [
     "CREDENTIAL_TTL_SECONDS",
     "AuditProducer",
     "get_audit_producer",
+    "send_to_dlq",
 ]

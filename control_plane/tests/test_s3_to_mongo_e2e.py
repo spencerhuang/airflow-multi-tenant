@@ -4,8 +4,8 @@ This test validates the complete event-driven data pipeline:
 - Creates actual data in MinIO (S3)
 - Creates integration via Control Plane API
 - Debezium automatically captures database change (CDC)
-- Kafka consumer service processes CDC event
-- Airflow DAG is triggered automatically
+- Airflow AssetWatcher (KafkaMessageQueueTrigger) detects CDC event
+- cdc_integration_processor DAG triggers the ondemand DAG
 - Data is transferred from S3 to MongoDB
 
 Test Flow:
@@ -13,7 +13,8 @@ Test Flow:
 2. Verify data exists in MinIO
 3. Create integration via Control Plane API → INSERT into MySQL
    → Debezium detects change → Publishes CDC event to Kafka
-4. Wait for Kafka consumer service to process CDC event and trigger Airflow DAG
+4. Wait for AssetWatcher to detect CDC event → cdc_integration_processor DAG
+   → triggers s3_to_mongo_ondemand DAG
 5. Wait for DAG completion and verify data in MongoDB
 
 Prerequisites:
@@ -261,6 +262,12 @@ def setup_database(wait_for_services):
 
         # Clean up stale Airflow DAG runs from previous test sessions
         _cleanup_airflow_dag_runs("s3_to_mongo_ondemand", "test-e2e-")
+        _cleanup_airflow_dag_runs("cdc_integration_processor", "asset_triggered")
+
+        # Clear stale AssetEvents from Airflow metastore — these are separate
+        # from Kafka offsets and would trigger processor runs before the test's event.
+        from control_plane.tests.e2e_helpers import _clear_asset_events
+        _clear_asset_events()
 
         # Clean up stale audit schemas from previous test sessions
         try:
@@ -337,6 +344,14 @@ def setup_database(wait_for_services):
             db.close()
             # Clean up Airflow DAG runs for this session
             _cleanup_airflow_dag_runs("s3_to_mongo_ondemand", TEST_WORKSPACE_ID)
+
+            # Clean up CDC pipeline state for next test run
+            from control_plane.tests.e2e_helpers import cleanup_cdc_pipeline
+            cleanup_cdc_pipeline(
+                kafka_bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                airflow_api_url=AIRFLOW_API_URL,
+                get_airflow_headers=get_airflow_auth_headers,
+            )
             with engine.begin() as conn:
                 from sqlalchemy import text
                 # Delete in FK order: errors → runs → integrations → auth → workspace → customer
@@ -482,14 +497,14 @@ class TestS3ToMongoEndToEnd:
         )
 
         print(f"\nIntegration ID: {TestS3ToMongoEndToEnd.integration_id}")
-        print(f"\nPipeline: MySQL INSERT -> Debezium -> Kafka -> Consumer -> Airflow DAG")
+        print(f"\nPipeline: MySQL INSERT -> Debezium -> Kafka -> AssetWatcher -> cdc_integration_processor -> s3_to_mongo_ondemand")
 
         trigger_time = datetime.now(timezone.utc)
         dag_id = "s3_to_mongo_ondemand"
         headers = get_airflow_auth_headers()
         list_url = f"{AIRFLOW_API_URL}/dags/{dag_id}/dagRuns"
 
-        max_wait = 60  # seconds
+        max_wait = 120  # seconds (AssetWatcher poll + scheduler + processor DAG + ondemand trigger)
         interval = 5
         elapsed = 0
 
@@ -523,7 +538,7 @@ class TestS3ToMongoEndToEnd:
                 print(f"  ✓ State: {latest_run.get('state')}")
 
                 TestS3ToMongoEndToEnd.dag_run_id = dag_run_id
-                print(f"\n  Pipeline: MySQL INSERT -> Debezium -> Kafka -> Consumer -> Airflow DAG")
+                print(f"\n  Pipeline: MySQL INSERT -> Debezium -> Kafka -> AssetWatcher -> cdc_integration_processor -> s3_to_mongo_ondemand")
                 return
 
             print(f"    No DAG run yet ({elapsed}s / {max_wait}s)...")
@@ -532,8 +547,9 @@ class TestS3ToMongoEndToEnd:
             f"No DAG run found within {max_wait}s. CDC pipeline did not trigger.\n"
             f"Debug:\n"
             f"  1. Debezium connector: curl http://localhost:8083/connectors/integration-cdc-connector/status\n"
-            f"  2. Kafka consumer logs: docker-compose logs kafka-consumer | grep 'Processing CDC event'\n"
-            f"  3. Kafka topic: docker exec kafka kafka-console-consumer "
+            f"  2. Triggerer logs: docker-compose logs airflow-triggerer | grep -E 'cdc|apply_function|PoisonPill'\n"
+            f"  3. Processor DAG runs: curl -u admin:admin http://localhost:8080/api/v1/dags/cdc_integration_processor/dagRuns\n"
+            f"  4. Kafka topic: docker exec kafka kafka-console-consumer "
             f"--bootstrap-server localhost:9092 --topic cdc.integration.events --from-beginning --max-messages 10"
         )
 
@@ -646,7 +662,7 @@ class TestS3ToMongoEndToEnd:
         print(f"   6. ✅ Data successfully transferred from S3 to MongoDB")
         print(f"\n🎉 Complete CDC-driven data pipeline validated!")
         print(f"\n📊 Pipeline Flow:")
-        print(f"   MySQL → Debezium → Kafka → Consumer → Airflow → S3 → MongoDB")
+        print(f"   MySQL → Debezium → Kafka → AssetWatcher → Processor DAG → Ondemand DAG → S3 → MongoDB")
 
 
 if __name__ == "__main__":

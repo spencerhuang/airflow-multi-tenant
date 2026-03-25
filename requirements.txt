@@ -37,6 +37,7 @@ pymongo==4.16.0
 
 # Kafka/CDC
 kafka-python==2.3.0
+apache-airflow-providers-apache-kafka==1.11.3
 
 # Authentication
 python-jose[cryptography]==3.5.0

@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] - 2026-03-25
+
+### Added
+- **Native Airflow CDC event processing** — Replaced standalone `kafka_consumer/` microservice with Airflow's `AssetWatcher` + `KafkaMessageQueueTrigger` (AIP-82). CDC events now flow through the triggerer process into `cdc_integration_processor` DAG runs, eliminating a separate service, Dockerfile, and CI/CD pipeline.
+- `cdc_event_listener.py` — Asset definition with AssetWatcher that polls `cdc.integration.events` via `KafkaMessageQueueTrigger`.
+- `cdc_integration_processor.py` — Event-driven DAG scheduled on the CDC asset. Processes events, triggers ondemand DAGs, handles DLQ on failure.
+- `cdc_apply_function.py` — Lightweight apply function running in the triggerer. Validates CDC messages, extracts traceparent, implements retry-before-DLQ with file-based retry tracking.
+- `dlq_utils.py` in shared_utils — Shared DLQ persistence logic (database + Kafka DLQ topic + audit).
+- **CDC diagnostics API** — `GET /api/v1/diagnostics/cdc` shows Kafka consumer group offsets alongside Airflow's internal AssetEvent queue, with divergence detection. `POST /api/v1/diagnostics/cdc/cleanup` clears stale AssetEvents and optionally resets Kafka offsets.
+- `airflow-triggerer` service in Docker Compose (required for AssetWatcher/deferrable triggers).
+- `psycopg2-binary` dependency for control plane (Airflow metastore access for diagnostics).
+- CDC pipeline cleanup in e2e test fixtures — runs in `finally` block regardless of pass/fail.
+
+### Changed
+- `requirements.txt` — Added `apache-airflow-providers-apache-kafka>=1.11.3`.
+- `Dockerfile.airflow` — Added `librdkafka-dev` system dependency for `confluent-kafka`.
+- `docker-compose.yml` — Added `AIRFLOW_CONN_KAFKA_DEFAULT` with `enable.auto.commit: false`, `AIRFLOW_METADB_URL` for control plane, `postgres-airflow` dependency on control plane.
+- E2E tests updated to validate native Airflow CDC pipeline (AssetWatcher → Processor → Ondemand) instead of standalone consumer.
+- Documentation updated: README.md architecture diagram, IMPLEMENTATION_SUMMARY.md design decision revised.
+
+### Removed
+- `kafka_consumer/` directory — Standalone Kafka consumer microservice replaced by native Airflow event processing.
+- `docker/Dockerfile.kafka-consumer` — No longer needed.
+- `requirements-kafka-consumer.txt` — No longer needed.
+
 ## [0.1.5] - 2026-03-23
 
 ### Added
@@ -116,6 +141,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Kafka UI and Debezium UI for monitoring
 - Makefile with development, test, and Docker commands
 
+[0.1.6]: https://github.com/spencerhuang/airflow-multi-tenant/releases/tag/v0.1.6
 [0.1.0]: https://github.com/spencerhuang/airflow-multi-tenant/releases/tag/v0.1.0
 [0.1.1]: https://github.com/spencerhuang/airflow-multi-tenant/releases/tag/v0.1.1
 [0.1.2]: https://github.com/spencerhuang/airflow-multi-tenant/releases/tag/v0.1.2

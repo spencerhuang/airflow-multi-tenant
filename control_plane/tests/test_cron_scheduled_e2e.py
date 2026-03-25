@@ -325,6 +325,13 @@ def seed_mysql(wait_for_services):
         conn.close()
         print(f"  Cleaned up MySQL test data")
 
+        # Clean up CDC pipeline state (consumer group offsets, processor DAG runs)
+        from control_plane.tests.e2e_helpers import cleanup_cdc_pipeline
+        cleanup_cdc_pipeline(
+            airflow_api_url=AIRFLOW_API_URL,
+            get_airflow_headers=_airflow_headers,
+        )
+
 
 @pytest.fixture(scope="session")
 def minio_client(wait_for_services):

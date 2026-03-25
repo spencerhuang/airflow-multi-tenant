@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     AIRFLOW_API_URL: str = "http://localhost:8080/api/v2"
     AIRFLOW_USERNAME: str = "airflow"
     AIRFLOW_PASSWORD: str = "airflow"
+    AIRFLOW_METADB_URL: str = "postgresql+psycopg2://airflow:airflow@localhost:5432/airflow"
 
     # Security
     SECRET_KEY: str = "your-secret-key-here-change-in-production"

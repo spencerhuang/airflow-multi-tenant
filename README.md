@@ -48,17 +48,27 @@ Managed Airflow providers (Astronomer, MWAA, Cloud Composer) solve multi-tenancy
 Control Plane Service (REST API, port 8000)
  |                                    \
  v                                     \---> audit.events topic
-Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Kafka Consumer Service (standalone, port 8001)
-                                            |                |
-                                            v                v
-                                   Audit Service        Airflow REST API
-                                   (port 8002)                |
-                                            |                v
-                                            v    Airflow Scheduler --> Workers
-                               MySQL (schema-per-customer)          |
-                                                                    v
-                                                             audit.events topic
+Business DB (MySQL) --> CDC (Debezium) --> Kafka
+                                            |
+                          ┌─────────────────┼──────────────────────┐
+                          v                 v                      v
+                   Audit Service    Airflow Triggerer         audit.events
+                   (port 8002)      (AssetWatcher +            topic
+                          |         KafkaMessageQueueTrigger)
+                          v                 |
+                   MySQL (schema-       AssetEvent
+                   per-customer)            |
+                                            v
+                                   cdc_integration_processor DAG
+                                            |
+                                            v
+                                   s3_to_mongo_ondemand DAG
+                                            |
+                                            v
+                                     Airflow Workers
 ```
+
+The Airflow **triggerer** process runs a persistent `KafkaMessageQueueTrigger` via the `AssetWatcher` (AIP-82). When a matching CDC message arrives, the triggerer fires an `AssetEvent` that the scheduler converts into a `cdc_integration_processor` DAG run. This eliminates the standalone Kafka consumer microservice — CDC event processing is now fully native to Airflow.
 
 ## Project Structure
 
@@ -66,20 +76,14 @@ Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Kafka Consumer Service (sta
 .
 ├── packages/               # Shared pip-installable packages
 │   ├── shared_models/     # SQLAlchemy Core table definitions (single source of truth)
-│   └── shared_utils/      # Shared utilities (TimezoneConverter, etc.)
+│   └── shared_utils/      # Shared utilities (TimezoneConverter, dag_trigger, dlq_utils, etc.)
 ├── control_plane/          # FastAPI control plane service (REST API)
 │   ├── app/
-│   │   ├── api/           # REST API endpoints
+│   │   ├── api/           # REST API endpoints (integrations, dlq, diagnostics, health)
 │   │   ├── models/        # SQLAlchemy ORM models (use __table__ from shared_models)
 │   │   ├── schemas/       # Pydantic schemas
 │   │   ├── services/      # Business logic
 │   │   └── core/          # Configuration
-│   └── tests/
-├── kafka_consumer/         # Standalone Kafka CDC consumer service
-│   ├── app/
-│   │   ├── api/           # Health check endpoints (/health, /health/ready, /health/detailed)
-│   │   ├── services/      # KafkaConsumerService (CDC event processing, DAG triggering)
-│   │   └── core/          # Configuration, logging
 │   └── tests/
 ├── audit_service/          # Audit trail service (Kafka consumer → per-customer MySQL schemas)
 │   ├── app/
@@ -94,8 +98,8 @@ Business DB (MySQL) --> CDC (Debezium) --> Kafka --> Kafka Consumer Service (sta
 │   ├── mysql/
 │   └── tests/
 ├── airflow/                # Airflow components
-│   ├── dags/              # DAG definitions
-│   ├── plugins/           # Custom operators and hooks
+│   ├── dags/              # DAG definitions (cdc_event_listener, cdc_integration_processor, etc.)
+│   ├── plugins/           # Custom operators, hooks, and callbacks (cdc_apply_function)
 │   └── tests/
 └── docker/                 # Docker configuration
 ```
@@ -132,7 +136,7 @@ docker-compose up -d
 - Airflow UI: http://localhost:8080
 - Control Plane API: http://localhost:8000
 - API Documentation: http://localhost:8000/docs
-- Kafka Consumer Health: http://localhost:8001/health/detailed
+- CDC Diagnostics: http://localhost:8000/api/v1/diagnostics/cdc
 - Audit Service Health: http://localhost:8002/health
 
 ![Docker local](docs/Screenshot2026-02-04at10.56.10AM.png)
@@ -153,16 +157,16 @@ docker-compose up -d
 W3C traceparent headers flow end-to-end across the entire pipeline for log correlation:
 
 ```
-Debezium CDC ──→ Kafka (traceparent header) ──→ Consumer (trace_id in logs) ──→ Airflow DAG conf ──→ Task logs
+Debezium CDC ──→ Kafka (traceparent header) ──→ AssetWatcher apply_function ──→ AssetEvent payload ──→ Processor DAG ──→ Ondemand DAG conf ──→ Task logs
 ```
 
-A lightweight Java interceptor (`TraceparentInterceptor`) injects a `traceparent` header into every Kafka message at the Kafka Connect producer level — zero OpenTelemetry SDK dependencies. The Kafka consumer parses the header, attaches `trace_id` to all structured log lines, and forwards the full `traceparent` to Airflow via DAG run conf. Airflow tasks extract it via `TraceIdMixin` and prefix every log line with `[trace_id=...]`.
+A lightweight Java interceptor (`TraceparentInterceptor`) injects a `traceparent` header into every Kafka message at the Kafka Connect producer level — zero OpenTelemetry SDK dependencies. The `cdc_apply_function` (running in the Airflow triggerer) extracts the traceparent from Kafka message headers and includes it in the normalized payload. The `cdc_integration_processor` DAG reads it from the triggering AssetEvent and passes it through to the ondemand DAG via `dag_run.conf`. Airflow tasks extract it via `TraceIdMixin` and prefix every log line with `[trace_id=...]`.
 
 Traceparent headers are visible in Kafka UI and propagated through Airflow XCom:
 
 ![Distributed tracing — Kafka UI traceparent header and Airflow XCom](docs/Screenshot2026-03-17.png)
 
-**Disclaimer:** Trace IDs live only in Kafka headers, structured logs, and Airflow XCom — they are not persisted to the database (e.g., `integration_runs`). 
+**Disclaimer:** Trace IDs live only in Kafka headers, structured logs, and Airflow XCom — they are not persisted to the database (e.g., `integration_runs`).
 
 See [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) for the full design rationale and file-by-file breakdown.
 
@@ -178,14 +182,39 @@ FastAPI-based stateless REST API (port 8000) that manages:
 - DST normalization
 - Backfill policies
 
-### Kafka Consumer Service
+### CDC Event Processing (AssetWatcher + KafkaMessageQueueTrigger)
 
-Standalone FastAPI microservice (port 8001) that:
-- Consumes CDC events from Debezium via Kafka
-- Triggers Airflow DAGs when integrations are created
-- Runs independently from the control plane for independent scaling and failover
-- Provides health endpoints: `/health`, `/health/ready`, `/health/detailed`
-- Supports Dead Letter Queue (DLQ) for poison pill handling
+Native Airflow event-driven CDC processing that replaced the standalone Kafka consumer service:
+- **AssetWatcher** with `KafkaMessageQueueTrigger` runs in the Airflow triggerer process
+- Continuously polls `cdc.integration.events` topic for Debezium CDC events
+- `cdc_apply_function` validates/transforms each message in the triggerer (lightweight, no DB queries)
+- Matching messages create AssetEvents that trigger `cdc_integration_processor` DAG runs
+- Retry-before-DLQ: poison pills are retried (offset not committed) before routing to dead letter queue
+- Debezium operations supported: `c` (create), `r` (snapshot), `u` (update), `d` (delete) — only creates trigger DAG processing
+
+### CDC Pipeline Diagnostics
+
+The control plane provides diagnostic endpoints for the CDC pipeline at `/api/v1/diagnostics/cdc`:
+- **`GET /diagnostics/cdc`** — Shows Kafka consumer group offsets and Airflow's internal AssetEvent queue side by side, with a `diverged` flag when the two systems are out of sync
+- **`POST /diagnostics/cdc/cleanup`** — Clears stale AssetEvents from Airflow's metastore and optionally resets Kafka consumer group offsets
+
+**Why this exists:** Airflow's AssetEvent queue (in the Airflow postgres metastore) is separate from Kafka consumer offsets. Resetting Kafka offsets does NOT clear pending AssetEvents — they will still trigger processor DAG runs. This divergence is invisible without these diagnostic endpoints. See [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) for the full explanation.
+
+**Kafka offset reset requires stopping the triggerer first** (consumer group must be inactive):
+```bash
+# Stop the triggerer
+docker-compose stop airflow-triggerer
+
+# Wait ~45s for the Kafka session to expire, then call cleanup
+curl -X POST http://localhost:8000/api/v1/diagnostics/cdc/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"clear_asset_events": true, "reset_kafka_offsets": true}'
+
+# Restart the triggerer
+docker-compose start airflow-triggerer
+```
+
+Clearing AssetEvents alone does NOT require stopping the triggerer — it writes directly to the Airflow postgres metastore.
 
 ### Audit Service
 
@@ -208,7 +237,9 @@ Reusable modules wrapping data source APIs:
 ### Airflow DAGs
 
 - **Controller DAG**: [Controller DAG pattern](docs/DISPATCHER_PATTERN.md) — a single `s3_to_mongo_controller` DAG runs every hour, queries the control plane DB for all due integrations (`utc_next_run <= now`), and dispatches each one via `TriggerDagRunOperator` with Dynamic Task Mapping (DTM). Replaces 26+ static dispatcher files with one DAG that handles daily, weekly, and monthly schedules uniformly.
-- **On-Demand DAG**: `s3_to_mongo_ondemand` — triggered by the controller (scheduled), Kafka consumer (CDC), or control plane API (manual). All trigger paths reuse the same pipeline: Prepare → Validate → Execute → Cleanup.
+- **CDC Event Listener**: `cdc_event_listener` defines the `integration_cdc_events` Asset with an AssetWatcher that polls Kafka via `KafkaMessageQueueTrigger`
+- **CDC Integration Processor**: `cdc_integration_processor` — triggered by AssetEvents from the watcher. Reads the CDC payload, queries the integration from the control plane DB, builds conf, and triggers the appropriate ondemand DAG. Includes DLQ handling via `handle_dlq` task (trigger_rule=ONE_FAILED)
+- **On-Demand DAG**: `s3_to_mongo_ondemand` — triggered by the controller (scheduled), CDC processor (event-driven), or control plane API (manual). All trigger paths reuse the same pipeline: Prepare → Validate → Execute → Cleanup.
 
 ## Testing Strategy
 

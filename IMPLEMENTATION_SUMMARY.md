@@ -1,168 +1,196 @@
-# Implementation Summary: Kafka Consumer Service
+# Implementation Summary
 
 ## What Was Delivered
 
-### 0. Design Decision  ✅
+### 0. Design Decision: Native Airflow KafkaMessageQueueTrigger ✅
 
-Airflow 3.1.7 now offers a stable Kafka Message Queue Trigger with stable Kafka Provider v1.12.0 starting Feb 2026. However,
-### ⚖️ Technical Verdict: Airflow 3 Kafka Trigger vs. Custom Consumer Service
+#### Original Assessment (v0.1.1)
 
-| Capability | Airflow 3 Kafka Trigger | Custom Consumer Microservice |
+Airflow 3.1.7 introduced a stable Kafka Message Queue Trigger with Kafka Provider v1.12.0. We initially chose a standalone Kafka consumer microservice due to concerns about offset management, delivery guarantees, and DLQ support.
+
+#### Revised Decision (v0.1.6): Migrate to AssetWatcher + KafkaMessageQueueTrigger
+
+After operating the standalone consumer, we revisited the tradeoffs. The standalone service added significant operational overhead (separate Dockerfile, CI/CD, container, health monitoring) for a workload that is fundamentally **orchestration signaling** — "wake up and start work" — not high-volume stream processing.
+
+| Concern | Original Assessment | Actual Experience |
 | :--- | :--- | :--- |
-| **Primary Role** | **Orchestration Signaling**: "Wake up and start work." | **Stream Processing**: High-volume data movement/transformation. |
-| **Offset Management** | ⚠️ **Basic**: Relies on Auto-commit; lacks granular consumer-group state management. | ✅ **Robust**: Supports manual commits and precise offset tracking. |
-| **Delivery Guarantee** | **At-Most-Once / At-Least-Once**: Risk of message loss or double-triggering during crashes. | ✅ **Exactly-Once**: Possible via Kafka Transactional API and idempotent producers. |
-| **Throughput** | ⚠️ **Moderate**: Limited by the `asyncio` event loop capacity of the Triggerer process. | ✅ **Ultra-High**: Horizontally scalable to millions of events/sec. |
-| **Error Handling (DLQ)** | ❌ **Manual**: No native DLQ; must be custom-coded in `apply_function`. | ✅ **Native**: Standard patterns available via libraries (e.g., Spring/Confluent). |
-| **Retry Policy** | ❌ **Minimal**: No native backoff/re-queueing at the trigger level. | ✅ **Sophisticated**: Built-in exponential backoff and retry-topic routing. |
-| **Operational Effort** | ✅ **Low**: Managed within Airflow; no extra infra/health-checks needed. | ❌ **High**: Requires separate CI/CD, K8s manifests, and monitoring. |
+| **Offset Management** | ⚠️ Basic auto-commit | ✅ Manual commit via `enable.auto.commit: false` + raise-to-prevent-commit pattern |
+| **DLQ** | ❌ No native support | ✅ Implemented in `apply_function` with file-based retry tracking |
+| **Retry Policy** | ❌ Minimal | ✅ Retry-before-DLQ: raise exception → trigger crashes → offset not committed → message redelivered |
+| **Throughput** | ⚠️ Moderate (triggerer asyncio) | ✅ Adequate — CDC events are metadata-only, not high-volume data |
+| **Operational Effort** | ✅ Low (within Airflow) | ✅ Eliminated separate service, Dockerfile, CI/CD, and health monitoring |
 
+**Verdict**: For CDC orchestration signaling (low-volume metadata events that trigger DAG runs), the native Airflow approach eliminates an entire microservice while providing equivalent reliability through the retry-before-DLQ pattern.
 
-### 1. Production Kafka Consumer Service ✅
+### 1. AssetWatcher + KafkaMessageQueueTrigger (CDC Event Ingestion) ✅
 
-**File**: [kafka_consumer/app/services/kafka_consumer_service.py](kafka_consumer/app/services/kafka_consumer_service.py)
+Replaced the standalone `kafka_consumer/` microservice with Airflow's native event-driven scheduling:
 
-A standalone FastAPI microservice (port 8001) that:
-- Subscribes to Kafka CDC events (`cdc.integration.events`)
-- Runs as an independent service, decoupled from the Control Plane
-- Automatically triggers Airflow DAGs when integrations are created
-- Handles errors gracefully with DLQ support
-- Supports custom event handlers
-- Provides health endpoints (`/health`, `/health/ready`, `/health/detailed`)
-- Enables independent scaling and failover
-
-**Key Implementation**:
+**Asset Definition** — [airflow/dags/cdc_event_listener.py](airflow/dags/cdc_event_listener.py):
 ```python
-class KafkaConsumerService:
-    def start() -> None:
-        """Start consumer in background thread"""
-
-    def stop() -> None:
-        """Gracefully stop consumer"""
-
-    def _process_message(message: dict) -> None:
-        """Process CDC events"""
-
-    def _trigger_integration_workflow(data: dict) -> None:
-        """Trigger Airflow DAG for integration"""
+integration_cdc_asset = Asset(
+    name="integration_cdc_events",
+    uri="kafka://kafka/cdc.integration.events",
+    watchers=[AssetWatcher(
+        name="cdc_integration_watcher",
+        trigger=KafkaMessageQueueTrigger(
+            topics=["cdc.integration.events"],
+            kafka_config_id="kafka_default",
+            apply_function="callbacks.cdc_apply_function.cdc_apply_function",
+            poll_timeout=1,
+            poll_interval=1,
+        ),
+    )],
+)
 ```
 
-### 2. Standalone Service Lifecycle ✅
+**Apply Function** — [airflow/plugins/callbacks/cdc_apply_function.py](airflow/plugins/callbacks/cdc_apply_function.py):
+- Runs in the triggerer process (sync, wrapped by `sync_to_async`)
+- Parses Debezium CDC messages (`__op` field) and legacy events (`event_type` field)
+- Extracts W3C `traceparent` from Kafka message headers
+- Returns normalized payload for `integration.created` events, `None` for all others
+- **Retry-before-DLQ**: file-based retry tracking (`/tmp/cdc_apply_retries.json`) — raises `_PoisonPill` to prevent offset commit on parse failures, routes to DLQ after max retries exhausted
 
-**File**: [kafka_consumer/app/main.py](kafka_consumer/app/main.py)
+**Offset commit behavior** (`AwaitMessageTrigger.run()`):
+- `apply_function` returns truthy → offset committed, TriggerEvent yielded
+- `apply_function` returns `None` → offset committed, message skipped
+- `apply_function` raises exception → trigger crashes, offset NOT committed → Airflow restarts trigger → consumer re-reads from last committed offset (message redelivered)
 
-Standalone FastAPI app with modern `lifespan` context manager:
+### 2. CDC Integration Processor DAG ✅
+
+**File**: [airflow/dags/cdc_integration_processor.py](airflow/dags/cdc_integration_processor.py)
+
+Event-driven DAG triggered by the `integration_cdc_events` Asset:
+
 ```python
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    initialize_kafka_consumer()
-    yield
-    shutdown_kafka_consumer()
+with DAG(
+    dag_id="cdc_integration_processor",
+    schedule=[integration_cdc_asset],  # Triggered by AssetEvents
+    ...
+) as dag:
+    result = process_and_trigger()   # @task (retries=3, exp backoff)
+    handle_dlq_task = handle_dlq()   # @task (trigger_rule=ONE_FAILED)
+    result >> handle_dlq_task
 ```
 
-The control plane ([control_plane/app/main.py](control_plane/app/main.py)) no longer manages the Kafka consumer — it is a pure stateless REST API.
+**`process_and_trigger`**: Reads event payload from `context["triggering_asset_events"]`, queries the integration from the control plane DB, builds DAG run conf, resolves auth credentials, triggers the ondemand DAG via Airflow REST API, records IntegrationRun, and emits audit event.
 
-### 3. Comprehensive Test Suite ✅
+**`handle_dlq`**: Fires when `process_and_trigger` fails after 3 retries. Persists the failed message to the `dead_letter_messages` table and Kafka DLQ topic.
 
-**File**: [kafka_consumer/tests/test_kafka_consumer_service.py](kafka_consumer/tests/test_kafka_consumer_service.py)
+### 3. DLQ Strategy (3 Layers) ✅
 
-Complete test coverage with **18 test cases**:
+| Layer | Where | Handles |
+|-------|-------|---------|
+| **Apply function retries** | Triggerer process | Parse/validation failures — raises to prevent offset commit, redelivers message |
+| **Task retries** | `process_and_trigger` task | Transient errors (DB down, API timeout) — 3 retries with exponential backoff |
+| **DLQ persistence** | `handle_dlq` task | Permanent failures — writes to `dead_letter_messages` table + Kafka DLQ topic + audit trail |
 
-**Unit Tests** (9 tests):
-- `test_consumer_initialization` - Verify service initialization
-- `test_consumer_start_stop` - Test lifecycle management
-- `test_process_message_integration_created` - Test event processing
-- `test_process_message_integration_updated` - Test update events
-- `test_process_message_integration_deleted` - Test delete events
-- `test_process_message_run_events` - Test run lifecycle events
-- `test_process_message_unknown_event` - Test unknown event handling
-- `test_process_message_error_handling` - Test error recovery
-- `test_consumer_with_custom_handler` - Test custom handlers
+### 4. CDC Pipeline Diagnostics & Cleanup ✅
 
-**Integration Tests** (2 tests):
-- `test_consumer_receives_published_message` - Test with real Kafka
-- `test_multiple_messages_in_sequence` - Test batch processing
+**File**: [control_plane/app/api/diagnostics.py](control_plane/app/api/diagnostics.py)
 
-**Global Service Tests** (3 tests):
-- `test_initialize_and_shutdown` - Test singleton management
-- `test_initialize_twice_warning` - Test double-init handling
-- `test_shutdown_when_not_initialized` - Test shutdown safety
+#### The Problem: Airflow AssetEvent / Kafka Offset Divergence
 
-**Health & Observability Tests** (4 tests):
-- `test_health_observability_attributes` - Test metrics tracking attributes
-- `test_messages_processed_counter` - Test processing counter increments
-- `test_messages_failed_counter` - Test failure counter increments
-- `test_is_connected_flag` - Test connection state tracking
+Airflow's `AssetWatcher` creates `AssetEvent` rows in the Airflow postgres metastore. These are **separate from Kafka consumer offsets**. Resetting Kafka offsets does NOT clear pending AssetEvents — they will still trigger `cdc_integration_processor` DAG runs.
 
-**Run Tests**:
+This divergence is invisible without diagnostics. Example scenario:
+1. Triggerer reads 5 CDC messages from Kafka → creates 5 AssetEvents in postgres
+2. Operator resets Kafka consumer group offset to latest (e.g., via `kafka-consumer-groups --reset-offsets`)
+3. Kafka shows lag=0, but Airflow still has 5 pending AssetEvents → 5 unwanted DAG runs
+
+#### Diagnostic Endpoint: `GET /api/v1/diagnostics/cdc`
+
+Shows Kafka consumer group offsets and Airflow's AssetEvent queue side by side:
+
+```json
+{
+  "kafka": {
+    "consumer_group": "cdc-consumer-airflow",
+    "partitions": [{"partition": 0, "committed_offset": 11, "end_offset": 11, "lag": 0}],
+    "total_lag": 0
+  },
+  "airflow_asset_events": {
+    "pending_count": 5,
+    "queued_dag_runs": 0,
+    "events": [
+      {"event_id": 10, "integration_id": 21, "event_type": "integration.created", "timestamp": "..."}
+    ]
+  },
+  "diverged": true,
+  "divergence_detail": "5 AssetEvent(s) pending in Airflow metastore but Kafka consumer is caught up (lag=0)..."
+}
+```
+
+#### Cleanup Endpoint: `POST /api/v1/diagnostics/cdc/cleanup`
+
+Clears stale state from both systems:
+
+```json
+// Request
+{"clear_asset_events": true, "reset_kafka_offsets": true}
+
+// Response
+{"asset_events_cleared": 5, "dag_run_queue_cleared": 0, "kafka_offsets_reset": true, "new_offsets": {"partition_0": 11}}
+```
+
+**AssetEvent cleanup** writes directly to the Airflow postgres metastore (deletes from `asset_dag_run_queue`, `dagrun_asset_event`, `asset_event` tables). Does NOT require stopping the triggerer.
+
+**Kafka offset reset** requires the consumer group to be inactive. The endpoint checks for active members and returns a clear error if the triggerer is still running:
+
+```json
+{"kafka_offsets_reset": false, "kafka_error": "Consumer group 'cdc-consumer-airflow' has 1 active member(s). Stop the airflow-triggerer before resetting offsets."}
+```
+
+#### How to Reset Kafka Offsets
+
+The `KafkaMessageQueueTrigger` runs a `confluent-kafka` consumer in the Airflow triggerer process. Kafka requires the consumer group to have no active members before offsets can be reset.
+
 ```bash
-pytest kafka_consumer/tests/test_kafka_consumer_service.py -v -s
+# 1. Stop the triggerer (this stops the Kafka consumer)
+docker-compose stop airflow-triggerer
+
+# 2. Wait for the Kafka session to expire (~45 seconds)
+#    The confluent-kafka consumer has a default session.timeout.ms of 45s.
+#    Until the session expires, Kafka still considers the consumer active.
+
+# 3. Reset offsets via the control plane API
+curl -X POST http://localhost:8000/api/v1/diagnostics/cdc/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"clear_asset_events": true, "reset_kafka_offsets": true}'
+
+# 4. Restart the triggerer
+docker-compose start airflow-triggerer
 ```
 
-### 4. Updated E2E Test (Event-Driven) ✅
+Alternatively, clear only AssetEvents (no triggerer stop required):
+```bash
+curl -X POST http://localhost:8000/api/v1/diagnostics/cdc/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"clear_asset_events": true, "reset_kafka_offsets": false}'
+```
+
+### 5. Updated E2E Tests ✅
 
 **File**: [control_plane/tests/test_s3_to_mongo_e2e.py](control_plane/tests/test_s3_to_mongo_e2e.py)
 
-**Changed from**: Direct Airflow API calls
-**Changed to**: Kafka event-driven triggering
+The E2E test validates the complete native Airflow CDC pipeline:
 
-**Old Flow**:
 ```
-Test → Airflow API → DAG Execution
-```
-
-**New Flow**:
-```
-Test → Kafka Event → Consumer Service → Airflow API → DAG Execution
+Test → Create integration via API → MySQL INSERT
+  → Debezium detects change → CDC event to Kafka
+  → AssetWatcher detects event → AssetEvent created
+  → cdc_integration_processor DAG triggered
+  → s3_to_mongo_ondemand DAG triggered
+  → Data transferred from S3 to MongoDB
 ```
 
-**Key Changes**:
-- Added `kafka_producer` fixture
-- Renamed `test_04_trigger_workflow` → `test_04_trigger_workflow_via_kafka`
-- Publishes `integration.created` event to Kafka
-- Waits for consumer to process event and trigger DAG
-- Validates complete event-driven pipeline
-
-**Test Steps**:
-1. Upload test data to MinIO
-2. Verify data in MinIO
-3. Create integration via API
-4. **Publish Kafka event** ← NEW
-5. **Consumer triggers DAG** ← NEW
-6. Verify data in MongoDB
-
-**Run Test**:
-```bash
-pytest control_plane/tests/test_s3_to_mongo_e2e.py -v -s
-```
-
-### 5. Complete Documentation ✅
-
-Created three comprehensive documentation files:
-
-**[KAFKA_CONSUMER.md](docs/KAFKA_CONSUMER.md)** (470 lines):
-- Architecture overview
-- Implementation details
-- Configuration guide
-- Testing procedures
-- Error handling
-- Troubleshooting
-- Production considerations
-- Monitoring and observability
-
-**[KAFKA_EVENT_DRIVEN_IMPLEMENTATION.md](docs/KAFKA_EVENT_DRIVEN_IMPLEMENTATION.md)** (550+ lines):
-- Complete implementation summary
-- Architecture diagrams
-- Data flow visualization
-- Configuration details
-- Running instructions
-- Monitoring commands
-- Future enhancements
-
-**[E2E_TEST_GUIDE.md](E2E_TEST_GUIDE.md)** (updated):
-- Updated with Kafka consumer section
-- New event-driven test flow diagram
-- Added kafka-python to prerequisites
+**CDC pipeline cleanup** runs in the test fixture `finally` block (regardless of pass or fail) via shared helpers in [control_plane/tests/e2e_helpers.py](control_plane/tests/e2e_helpers.py):
+1. Stop the triggerer
+2. Reset Kafka consumer group offset to latest
+3. Delete processor DAG runs via Airflow API
+4. Clear stale AssetEvents from Airflow metastore (via `docker exec` psql)
+5. Clear triggerer retry state file
+6. Restart the triggerer
 
 ## How It Works
 
@@ -174,61 +202,67 @@ Created three comprehensive documentation files:
 
 2. CDC Event Published
    Debezium → Kafka Topic (cdc.integration.events)
+   (with traceparent header from TraceparentInterceptor)
 
-3. Consumer Processes Event
-   Kafka Consumer Service (background thread)
+3. AssetWatcher Processes Event (in Airflow Triggerer)
+   KafkaMessageQueueTrigger polls message
    ↓
-   Reads event from Kafka
+   cdc_apply_function(message) called
    ↓
-   Validates event data
+   Parses CDC payload, extracts traceparent
    ↓
-   Calls IntegrationService.trigger_integration()
-   ↓
-   Makes Airflow REST API call
-   ↓
-   DAG triggered!
+   Returns normalized dict → TriggerEvent → AssetEvent
 
-4. Airflow Executes Workflow
-   DAG: Prepare → Validate → Execute → Cleanup
+4. Scheduler Triggers Processor DAG
+   AssetEvent → cdc_integration_processor DAG run
+   ↓
+   process_and_trigger task:
+     - Reads payload from triggering_asset_events
+     - Queries integration from control plane DB
+     - Builds conf, resolves auth credentials
+     - Triggers s3_to_mongo_ondemand via Airflow REST API
+     - Records IntegrationRun, emits audit event
 
-5. Data Transferred
+5. Airflow Executes Workflow
+   s3_to_mongo_ondemand DAG: Prepare → Validate → Execute → Cleanup
+
+6. Data Transferred
    MinIO/S3 → MongoDB
 ```
 
-### Consumer Service Architecture
+### CDC Event Processing Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│  Kafka Consumer Microservice (port 8001)    │
-│                                             │
-│  lifespan(app):                             │
-│    → initialize_kafka_consumer()            │
-│       → KafkaConsumerService.start()        │
-│          → Background thread launched       │
-│          → Subscribes to Kafka topic        │
-│    yield                                    │
-│    → shutdown_kafka_consumer()              │
-│       → Stop polling                        │
-│       → Commit offsets                      │
-│       → Close connections                   │
-│                                             │
-│  while running:                            │
-│    messages = poll(kafka)                   │
-│    for msg in messages:                    │
-│      process_message(msg)                   │
-│        ↓                                    │
-│      if event == "integration.created":     │
-│        trigger_integration_workflow()       │
-│          ↓                                  │
-│        Airflow API call                     │
-│          ↓                                  │
-│        DAG triggered                        │
-│                                             │
-│  Health Endpoints:                          │
-│    GET /health          (liveness)          │
-│    GET /health/ready    (readiness)         │
-│    GET /health/detailed (diagnostics)       │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  AIRFLOW TRIGGERER PROCESS (asyncio)                        │
+│                                                             │
+│  KafkaMessageQueueTrigger                                   │
+│    - Polls cdc.integration.events continuously              │
+│    - apply_function validates/transforms each message       │
+│    - On match: yields TriggerEvent → AssetEvent created     │
+│                                                             │
+│  AssetWatcher(name="cdc_watcher", trigger=kafka_trigger)    │
+│    - Wraps the trigger                                      │
+│    - Fires asset events to the scheduler                    │
+└─────────────────────────────────────────────────────────────┘
+                         │
+                         ▼ AssetEvent (payload = normalized message data)
+┌─────────────────────────────────────────────────────────────┐
+│  cdc_integration_processor DAG                              │
+│  schedule=[integration_cdc_asset]                           │
+│                                                             │
+│  [process_and_trigger]  @task (retries=3, exp backoff)      │
+│    - Read event from context["triggering_asset_events"]     │
+│    - Extract traceparent, log with trace_id                 │
+│    - Query DB, build conf, resolve auth                     │
+│    - Trigger s3_to_mongo_ondemand via Airflow REST API      │
+│    - Record IntegrationRun, emit audit event                │
+│         │                                                   │
+│        / \                                                  │
+│  [handle_dlq]            @task (trigger_rule=ONE_FAILED)    │
+│    - Persist to dead_letter_messages table + Kafka DLQ      │
+│    - Emit audit "message.dead_lettered"                     │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Running the System
@@ -243,114 +277,103 @@ docker-compose up -d
 docker-compose ps
 ```
 
-### 2. Verify Consumer Started
+### 2. Verify Triggerer Started
 
 ```bash
-# Check Kafka Consumer logs
-docker-compose logs kafka-consumer | grep "Kafka consumer"
+# Check triggerer logs for AssetWatcher activity
+docker-compose logs airflow-triggerer | grep -E "cdc|apply_function|AssetWatcher"
 
-# Expected:
-# INFO: Starting Kafka consumer for topic: cdc.integration.events
-# INFO: Kafka consumer connected to kafka:29092
-# INFO: Kafka consumer initialized successfully
-
-# Check health endpoints
-curl http://localhost:8001/health
-curl http://localhost:8001/health/ready
-curl http://localhost:8001/health/detailed
+# Check CDC pipeline diagnostics
+curl -s http://localhost:8000/api/v1/diagnostics/cdc | python3 -m json.tool
 ```
 
 ### 3. Monitor Activity
 
 **Kafka UI**: http://localhost:8081
 - Navigate to Consumer Groups
-- Find: `cdc-consumer`
+- Find: `cdc-consumer-airflow`
 - View lag and consumption rate
 
-**Kafka Consumer Logs**:
+**Triggerer Logs**:
 ```bash
-docker-compose logs -f kafka-consumer | grep "Processing CDC event"
+docker-compose logs -f airflow-triggerer | grep "cdc"
+```
+
+**CDC Diagnostics API**:
+```bash
+# Check Kafka offsets and AssetEvent queue
+curl -s http://localhost:8000/api/v1/diagnostics/cdc | python3 -m json.tool
 ```
 
 ### 4. Run Tests
 
 ```bash
-# Kafka consumer service tests
-pytest kafka_consumer/tests/test_kafka_consumer_service.py -v -s
-
-# E2E test (event-driven)
+# E2E test (CDC event-driven)
 pytest control_plane/tests/test_s3_to_mongo_e2e.py -v -s
+
+# E2E test (cron scheduled)
+pytest control_plane/tests/test_cron_scheduled_e2e.py -v -s
 ```
 
 ## Configuration
 
 **Docker Compose** ([docker-compose.yml](docker-compose.yml)):
 ```yaml
-kafka-consumer:
-  environment:
-    DATABASE_URL: mysql+pymysql://control_plane:control_plane@mysql:3306/control_plane
-    KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-    AIRFLOW_API_URL: http://airflow-webserver:8080/api/v2
+# Kafka connection for AssetWatcher trigger
+AIRFLOW_CONN_KAFKA_DEFAULT: '{"conn_type": "kafka", "extra": {
+  "bootstrap.servers": "kafka:29092",
+  "group.id": "cdc-consumer-airflow",
+  "auto.offset.reset": "earliest",
+  "enable.auto.commit": "false"
+}}'
+
+# Control plane needs Airflow metastore access for CDC diagnostics
+AIRFLOW_METADB_URL: 'postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow'
 ```
 
-**Application Config** ([kafka_consumer/app/core/config.py](kafka_consumer/app/core/config.py)):
-```python
-KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
-KAFKA_TOPIC_CDC: str = "cdc.integration.events"
-KAFKA_CONSUMER_GROUP: str = "cdc-consumer"
-```
-
-**Consumer Settings**:
-- Group ID: `cdc-consumer` (configurable via `KAFKA_CONSUMER_GROUP`)
+**Consumer Settings** (via `AIRFLOW_CONN_KAFKA_DEFAULT`):
+- Group ID: `cdc-consumer-airflow`
 - Auto Offset Reset: `earliest`
-- Auto Commit: Enabled
-- Max Records per Poll: 10
-- Consumer Timeout: 1 second
+- Auto Commit: `false` (manual commit via trigger)
+- Poll Interval: 1 second
+- Poll Timeout: 1 second
 
 ## Testing
 
 ### Run All Tests
 
 ```bash
-# Kafka consumer service tests
-pytest kafka_consumer/tests/test_kafka_consumer_service.py -v -s
-
-# E2E test (event-driven)
+# E2E test (CDC event-driven)
 pytest control_plane/tests/test_s3_to_mongo_e2e.py -v -s
 
-# All CDC tests
-pytest control_plane/tests/test_cdc_kafka.py -v -s
+# E2E test (cron scheduled)
+pytest control_plane/tests/test_cron_scheduled_e2e.py -v -s
 ```
 
 ### Expected Results
 
-**Kafka Consumer Tests**: 18/18 passing
-- 9 unit tests
-- 2 integration tests
-- 3 global service tests
-- 4 health/observability tests
-
-**E2E Test**: 6/6 passing
+**E2E Test (CDC)**: 6/6 passing
 - Upload to MinIO ✓
 - Verify MinIO data ✓
-- Create integration ✓
-- Trigger via Kafka ✓ (NEW)
+- Create integration ✓ (triggers Debezium CDC)
+- Wait for CDC pipeline ✓ (AssetWatcher → Processor → Ondemand)
 - Verify MongoDB data ✓
 - Summary ✓
 
 ## Files Created/Modified
 
-### Kafka Consumer Microservice (New)
+### CDC Event Processing (New — replaces kafka_consumer/ microservice)
 
-1. **kafka_consumer/app/main.py** — FastAPI app with lifespan context manager
-2. **kafka_consumer/app/core/config.py** — Slim Settings (Kafka, DB, Airflow, logging)
-3. **kafka_consumer/app/core/logging.py** — JSON logging configuration
-4. **kafka_consumer/app/services/kafka_consumer_service.py** — Consumer service with health observability
-5. **kafka_consumer/app/api/health.py** — Liveness, readiness, and detailed health endpoints
-6. **kafka_consumer/tests/test_kafka_consumer_service.py** — 18 test cases
-7. **kafka_consumer/tests/conftest.py** — Test configuration
-8. **docker/Dockerfile.kafka-consumer** — Container image for the consumer service
-9. **requirements-kafka-consumer.txt** — Minimal dependencies
+1. **airflow/dags/cdc_event_listener.py** — Asset + AssetWatcher definition
+2. **airflow/dags/cdc_integration_processor.py** — Event-driven processor DAG
+3. **airflow/plugins/callbacks/__init__.py** — Callbacks package init
+4. **airflow/plugins/callbacks/cdc_apply_function.py** — Apply function with retry-before-DLQ
+5. **packages/shared_utils/shared_utils/dlq_utils.py** — Shared DLQ persistence utilities
+
+### CDC Diagnostics (New)
+
+1. **control_plane/app/api/diagnostics.py** — Kafka offset + AssetEvent diagnostic and cleanup endpoints
+2. **control_plane/tests/e2e_helpers.py** — Shared CDC pipeline cleanup for e2e tests
 
 ### Audit Service (New)
 
@@ -370,32 +393,35 @@ pytest control_plane/tests/test_cdc_kafka.py -v -s
 
 ### Control Plane (Modified)
 
-1. **control_plane/app/main.py** — Removed Kafka consumer lifecycle (now pure REST API)
-2. **control_plane/app/core/config.py** — Removed Kafka settings
-3. **control_plane/app/services/kafka_consumer_service.py** — Deleted (moved to kafka_consumer/)
-4. **control_plane/tests/test_kafka_consumer_service.py** — Deleted (moved to kafka_consumer/)
+1. **control_plane/app/main.py** — Pure stateless REST API
+2. **control_plane/app/core/config.py** — Added `AIRFLOW_METADB_URL` for CDC diagnostics
+3. **control_plane/app/api/__init__.py** — Registered diagnostics router
+4. **control_plane/app/models/dead_letter_message.py** — ORM model for DLQ table
 
 ### Infrastructure (Modified)
 
-1. **docker-compose.yml** — Added kafka-consumer service, removed Kafka dependency from control-plane
+1. **docker-compose.yml** — Added `airflow-triggerer` service, `AIRFLOW_CONN_KAFKA_DEFAULT`, `AIRFLOW_METADB_URL`; removed `kafka-consumer` service
+2. **docker/Dockerfile.airflow** — Added `librdkafka-dev` for `confluent-kafka`
+3. **requirements.txt** — Added `apache-airflow-providers-apache-kafka>=1.11.3`
+4. **requirements-control-plane.txt** — Added `psycopg2-binary` for Airflow metastore access
 
 ### Documentation (Modified)
 
-1. **README.md** — Updated architecture, project structure, service access
-2. **IMPLEMENTATION_SUMMARY.md** (this file) — Updated to reflect standalone architecture
+1. **README.md** — Updated architecture diagram, project structure, key components, CDC diagnostics
+2. **IMPLEMENTATION_SUMMARY.md** (this file) — Replaced Kafka consumer sections with AssetWatcher approach
 
 ## Audit Trail Service ✅
 
 **Design Document**: [docs/AUDIT-TRAIL-DESIGN.md](docs/AUDIT-TRAIL-DESIGN.md)
 
-A standalone FastAPI microservice (port 8002) that provides a GDPR-compliant, per-customer audit trail across all three services (Control Plane, Kafka Consumer, Airflow).
+A standalone FastAPI microservice (port 8002) that provides a GDPR-compliant, per-customer audit trail across the Control Plane and Airflow services.
 
 ### Architecture
 
 ```
-Control Plane ─┐
-Kafka Consumer ─┼──→ Kafka (audit.events) ──→ Audit Consumer ──→ MySQL (schema-per-customer)
-Airflow DAGs  ─┘                                                    audit_{customer_guid}
+Control Plane  ─┐
+Airflow DAGs   ─┼──→ Kafka (audit.events) ──→ Audit Consumer ──→ MySQL (schema-per-customer)
+CDC Processor  ─┘                                                    audit_{customer_guid}
 ```
 
 All audit producers use a shared `AuditProducer` (threaded, fire-and-forget, never blocks the caller) from `shared_utils`. The Audit Service consumes events, auto-provisions a schema for each customer on first event, and persists the audit record.
@@ -454,24 +480,28 @@ Each customer gets an isolated MySQL schema (`audit_{customer_guid}`) cloned fro
 # Start everything
 docker-compose up -d
 
-# Verify consumer is running
-docker-compose logs kafka-consumer | grep "Kafka consumer"
+# Verify triggerer and AssetWatcher are running
+docker-compose logs airflow-triggerer | grep -E "cdc|apply_function"
 
-# Check consumer health
-curl http://localhost:8001/health/detailed
+# Check CDC pipeline diagnostics (Kafka offsets + AssetEvent queue)
+curl -s http://localhost:8000/api/v1/diagnostics/cdc | python3 -m json.tool
 
 # Run tests
-pytest kafka_consumer/tests/test_kafka_consumer_service.py -v
 pytest control_plane/tests/test_s3_to_mongo_e2e.py -v -s
 
-# Monitor consumer activity
-docker-compose logs -f kafka-consumer | grep "Processing CDC event"
+# Monitor triggerer activity
+docker-compose logs -f airflow-triggerer | grep "cdc"
 
 # Check Kafka consumer group
 docker exec kafka kafka-consumer-groups \
   --bootstrap-server localhost:9092 \
   --describe \
-  --group cdc-consumer
+  --group cdc-consumer-airflow
+
+# Clean up stale CDC state (AssetEvents only — no triggerer stop needed)
+curl -X POST http://localhost:8000/api/v1/diagnostics/cdc/cleanup \
+  -H "Content-Type: application/json" \
+  -d '{"clear_asset_events": true, "reset_kafka_offsets": false}'
 ```
 
 ## Error Tracking: XCom-Based Pipeline Error Capture
@@ -692,7 +722,7 @@ We replaced `pip` and `pip-tools` (`pip-compile`) with [uv](https://docs.astral.
 |------|--------|
 | `Makefile` | `pip install` → `uv pip install`, `pip-compile` → `uv pip compile` |
 | `docker/Dockerfile.control-plane` | Added uv binary via multi-stage copy, `pip install` → `uv pip install --system` |
-| `docker/Dockerfile.kafka-consumer` | Same as above |
+| `docker/Dockerfile.airflow` | Same as above |
 | `.github/workflows/unit-tests.yml` | Replaced `actions/setup-python` with `astral-sh/setup-uv@v5`, `uv venv`, and `uv run` |
 | `run_all_tests.sh` | `pip install` → `uv pip install` |
 | `requirements-dev.txt` | Removed `pip-tools` (uv replaces it) |
@@ -706,7 +736,7 @@ All `requirements*.txt` files remain unchanged — uv is fully compatible with p
 uv offers a native workspace mode (`[tool.uv.workspace]`) that manages dependencies via `uv.lock` and `uv sync`. We intentionally chose **not** to use it because of the **SQLAlchemy version split**:
 
 - **Airflow context** requires `sqlalchemy>=1.4,<2.0` (Airflow 3.0.6 core constraint)
-- **Control Plane and Kafka Consumer** use `sqlalchemy==2.0.46`
+- **Control Plane** uses `sqlalchemy==2.0.48`
 
 uv workspaces resolve a **single version per package** across all workspace members. There is no way to have one member use SQLAlchemy 1.x and another use 2.x within the same workspace lockfile.
 
@@ -716,7 +746,6 @@ The 7 separate `requirements*.txt` files exist because this is a multi-service m
 |------|---------|------------|
 | `requirements.txt` | Full Airflow environment | `<2.0` |
 | `requirements-control-plane.txt` | FastAPI control plane | `==2.0.46` |
-| `requirements-kafka-consumer.txt` | Lightweight Kafka consumer | `==2.0.46` |
 | `requirements-test.txt` | CI unit tests (no Airflow) | `==2.0.46` |
 | `requirements-dev.txt` | Local development (includes Airflow) | `<2.0` |
 | `requirements-lock.txt` | Locked Airflow deps with hashes | `<2.0` |
@@ -812,16 +841,15 @@ This keeps the production image minimal (only adds ~3KB) while the JDK build too
 └──────────┬───────────┘
            ↓  (Kafka message with traceparent header)
 ┌──────────────────────┐
-│  Kafka Consumer       │
-│  Service              │
+│  Airflow Triggerer    │
+│  (cdc_apply_function) │
 │                       │
-│  _extract_trace_context(record)
-│  → TraceContext.from_kafka_headers()
-│  → Parses traceparent → trace_id
-│  → Attaches trace_id to all log lines
-│  → Passes traceparent in Airflow DAG conf
+│  _extract_traceparent(message.headers())
+│  → Parses traceparent from Kafka headers
+│  → Includes in normalized payload dict
+│  → Payload becomes AssetEvent.extra
 └──────────┬───────────┘
-           ↓  (Airflow REST API: conf.traceparent)
+           ↓  (AssetEvent → cdc_integration_processor → conf.traceparent)
 ┌──────────────────────┐
 │  Airflow DAG Tasks    │
 │                       │
@@ -841,8 +869,8 @@ This keeps the production image minimal (only adds ~3KB) while the JDK build too
 | `docker-compose.yml` | `kafka-connect` service: `build:` replaces `image:`, adds `CONNECT_PRODUCER_INTERCEPTOR_CLASSES` env var |
 | `packages/shared_utils/shared_utils/trace_context.py` | Python `TraceContext` class — parses/generates W3C traceparent strings |
 | `packages/shared_utils/shared_utils/__init__.py` | Exports `TraceContext` from `shared_utils` |
-| `kafka_consumer/app/services/kafka_consumer_service.py` | Extracts traceparent from Kafka headers, threads trace_id through all log lines and Airflow DAG conf |
-| `kafka_consumer/app/core/logging.py` | `JSONFormatter` emits `trace_id` field in structured logs |
+| `airflow/plugins/callbacks/cdc_apply_function.py` | Extracts traceparent from Kafka message headers, includes in normalized payload |
+| `airflow/dags/cdc_integration_processor.py` | Reads traceparent from AssetEvent payload, threads through DAG conf |
 | `airflow/plugins/operators/base_operators.py` | `TraceIdMixin` — extracts traceparent from dag_run conf or XCom for all task operators |
 | `airflow/plugins/operators/s3_to_mongo_operators.py` | All tasks (Prepare/Validate/Execute/CleanUp) prefix logs with `[trace_id=...]` |
 | `airflow/plugins/operators/dispatch_operators.py` | `find_and_prepare_due_integrations()` generates a fresh traceparent for scheduler-triggered DAGs |
@@ -853,9 +881,9 @@ This keeps the production image minimal (only adds ~3KB) while the JDK build too
 
 2. **Fallback to `TraceContext.new()`** — If the traceparent header is missing (e.g., manual Airflow trigger, legacy messages), a fresh context is generated rather than failing. Tracing is always-on, never blocking.
 
-3. **Two propagation paths into Airflow** — `dag_run.conf.traceparent` (set by Kafka consumer) is the primary path. `XCom` (pushed by PrepareTask) is the fallback for downstream tasks that can't access dag_run conf directly.
+3. **Two propagation paths into Airflow** — `dag_run.conf.traceparent` (set by `cdc_integration_processor` from the AssetEvent payload) is the primary path. `XCom` (pushed by PrepareTask) is the fallback for downstream tasks that can't access dag_run conf directly.
 
-4. **Scheduler-triggered DAGs get tracing too** — `find_and_prepare_due_integrations()` calls `TraceContext.new().traceparent` so scheduled runs (not triggered by Kafka) still have a trace_id for log correlation.
+4. **Scheduler-triggered DAGs get tracing too** — `find_and_prepare_due_integrations()` calls `TraceContext.new().traceparent` so scheduled runs (not triggered by CDC) still have a trace_id for log correlation.
 
 5. **`CONNECT_PRODUCER_INTERCEPTOR_CLASSES` env var** — Kafka Connect applies the interceptor to all connectors in the cluster without modifying individual connector configs. One setting, all CDC topics get traceparent headers.
 
@@ -948,7 +976,7 @@ Credential vault helpers:
 - `fetch_credentials(dag_run_id)` — `GET` or raise `AirflowFailException`
 - `delete_credentials(dag_run_id)` — explicit `DELETE`
 
-The `redis` package is optional — import is wrapped in `try/except ImportError` in `__init__.py` so control_plane and kafka_consumer (which don't need Redis) aren't affected.
+The `redis` package is optional — import is wrapped in `try/except ImportError` in `__init__.py` so services that don't need Redis aren't affected.
 
 ### Component 3: Fernet Key from Docker Secret
 
@@ -978,7 +1006,7 @@ Non-sensitive configuration (bucket names, collection names, integration IDs) st
 
 ### Component 5: Service Configuration Integration
 
-Both the control plane and kafka consumer use `@model_validator(mode="after")` in their Pydantic `Settings` classes to override sensitive fields via the unified secret provider:
+The control plane uses `@model_validator(mode="after")` in its Pydantic `Settings` class to override sensitive fields via the unified secret provider:
 
 **`control_plane/app/core/config.py`**:
 ```python
@@ -992,8 +1020,6 @@ def _resolve_secrets(self) -> "Settings":
         object.__setattr__(self, "AIRFLOW_PASSWORD", airflow_pw)
     return self
 ```
-
-**`kafka_consumer/app/core/config.py`**: Same pattern for `AIRFLOW_PASSWORD` and `KAFKA_PASSWORD`.
 
 **`packages/shared_utils/shared_utils/db.py`**: `_build_default_db_url()` uses `get_infra_secrets().mysql_password` when constructing the control plane DB URL from components (fallback when `CONTROL_PLANE_DB_URL` env var is not set).
 
@@ -1043,7 +1069,6 @@ Opaque Secret with placeholder `stringData` for all infrastructure secrets. Inte
 | `packages/shared_utils/shared_utils/__init__.py` | Modified | New exports (secret_provider, redis_client) |
 | `packages/shared_utils/shared_utils/db.py` | Modified | Secret-aware DB URL construction |
 | `control_plane/app/core/config.py` | Modified | Pydantic secret resolution |
-| `kafka_consumer/app/core/config.py` | Modified | Pydantic secret resolution |
 | `airflow/plugins/operators/s3_to_mongo_operators.py` | Modified | XCom to Redis for credentials |
 | `airflow/tests/test_s3_to_mongo_operators.py` | Modified | Redis mock assertions |
 | `.gitignore` | Modified | `docker/secrets/*` |
@@ -1064,7 +1089,7 @@ A single **Controller DAG** (`s3_to_mongo_controller`) runs every hour (`0 * * *
 ```
 Phase A: @task find_due_integrations()
   → Queries: WHERE utc_next_run <= now AND usr_sch_status = 'active'
-  → Builds conf dict per integration (same as control plane API / Kafka consumer)
+  → Builds conf dict per integration (same as control plane API / CDC processor)
   → Advances utc_next_run to next cron occurrence
   → Returns list[dict] with {conf, trigger_run_id}
 
@@ -1104,7 +1129,7 @@ All paths target `s3_to_mongo_ondemand` and build identical conf dicts:
 | Trigger Source | When | Sample `dag_run_id` |
 |---|---|---|
 | Control plane API | On-demand / manual | `ws-abc_s3_to_mongo_ondemand_manual_20260310_183116_3` |
-| Kafka consumer | CDC event | `ws-abc_s3_to_mongo_ondemand_cdc_20260310_183335_2` |
+| CDC processor DAG | Debezium CDC event | `ws-abc_s3_to_mongo_ondemand_cdc_20260310_183335_2` |
 | Controller DAG | Hourly cron | `ws-abc_s3_to_mongo_ondemand_scheduled_20260310_204234_0` |
 
 ### Test Coverage
@@ -1125,7 +1150,7 @@ Full pipeline: Seed MySQL → Upload to MinIO → Deploy test controller DAG →
 
 ## Summary
 
-**Kafka Consumer Service**: Standalone FastAPI microservice (port 8001) — scales independently, Kafka consumer group rebalancing, health endpoints, modern lifespan management, direct MySQL via pymysql, Core tables (no ORM dependency).
+**CDC Event Processing**: Native Airflow `AssetWatcher` + `KafkaMessageQueueTrigger` — replaces the standalone Kafka consumer microservice. CDC events flow through the triggerer process into `cdc_integration_processor` DAG runs with retry-before-DLQ, distributed tracing, and audit trail. Diagnostic endpoints expose Kafka/AssetEvent divergence.
 
 **Controller DAG**: Single hourly dispatcher using DTM — replaces 26+ static DAG files with one Controller DAG that queries `utc_next_run <= now` and fires `TriggerDagRunOperator.expand_kwargs()` for all due integrations.
 
