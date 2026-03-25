@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     KAFKA_DLQ_DB_ENABLED: bool = True
     KAFKA_CONSUMER_GROUP: str = "cdc-consumer"
 
+    # Message deduplication
+    KAFKA_DEDUP_ENABLED: bool = True
+    KAFKA_DEDUP_TTL_SECONDS: int = 86400  # 24 hours
+
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"

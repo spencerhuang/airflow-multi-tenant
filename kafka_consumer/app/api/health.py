@@ -84,6 +84,7 @@ def detailed(response: Response):
             "last_message_time": service.last_message_time.isoformat() if service.last_message_time else None,
             "messages_processed": service.messages_processed,
             "messages_failed": service.messages_failed,
+            "messages_deduplicated": service.messages_deduplicated,
             "last_error": service.last_error,
         },
         "dlq": dlq_info,

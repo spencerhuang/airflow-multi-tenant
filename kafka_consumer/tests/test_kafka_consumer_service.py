@@ -11,7 +11,6 @@ from kafka.errors import KafkaError
 
 from kafka_consumer.app.services.kafka_consumer_service import (
     KafkaConsumerService,
-    MessageRetryTracker,
     initialize_kafka_consumer,
     shutdown_kafka_consumer,
     get_kafka_consumer_service,
@@ -457,90 +456,6 @@ class TestConsumerServiceGlobals:
         shutdown_kafka_consumer()
 
 
-class TestMessageRetryTracker:
-    """Test suite for MessageRetryTracker."""
-
-    def test_retry_tracker_initialization(self):
-        """Test retry tracker initialization."""
-        tracker = MessageRetryTracker(max_retries=3)
-
-        assert tracker.max_retries == 3
-        assert len(tracker.retry_counts) == 0
-
-    def test_increment_retry(self):
-        """Test incrementing retry count."""
-        tracker = MessageRetryTracker(max_retries=3)
-
-        # First retry
-        count = tracker.increment_retry("msg-1")
-        assert count == 1
-
-        # Second retry
-        count = tracker.increment_retry("msg-1")
-        assert count == 2
-
-        # Third retry
-        count = tracker.increment_retry("msg-1")
-        assert count == 3
-
-    def test_reset_retry(self):
-        """Test resetting retry count."""
-        tracker = MessageRetryTracker(max_retries=3)
-
-        # Increment a few times
-        tracker.increment_retry("msg-1")
-        tracker.increment_retry("msg-1")
-        assert tracker.get_retry_count("msg-1") == 2
-
-        # Reset
-        tracker.reset_retry("msg-1")
-        assert tracker.get_retry_count("msg-1") == 0
-
-    def test_should_send_to_dlq(self):
-        """Test DLQ decision logic."""
-        tracker = MessageRetryTracker(max_retries=3)
-
-        # Initially should not go to DLQ
-        assert not tracker.should_send_to_dlq("msg-1")
-
-        # After 3 retries, should go to DLQ
-        tracker.increment_retry("msg-1")
-        tracker.increment_retry("msg-1")
-        tracker.increment_retry("msg-1")
-        assert tracker.should_send_to_dlq("msg-1")
-
-    def test_get_retry_count(self):
-        """Test getting retry count."""
-        tracker = MessageRetryTracker(max_retries=3)
-
-        # Non-existent message should return 0
-        assert tracker.get_retry_count("msg-1") == 0
-
-        # After increment, should return correct count
-        tracker.increment_retry("msg-1")
-        assert tracker.get_retry_count("msg-1") == 1
-
-    def test_thread_safety(self):
-        """Test that retry tracker is thread-safe."""
-        import threading
-
-        tracker = MessageRetryTracker(max_retries=10)
-
-        def increment_many_times():
-            for _ in range(10):
-                tracker.increment_retry("msg-1")
-
-        # Run in multiple threads
-        threads = [threading.Thread(target=increment_many_times) for _ in range(5)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        # Should have counted all 50 increments (5 threads * 10 each)
-        assert tracker.get_retry_count("msg-1") == 50
-
-
 class TestKafkaConsumerDLQ:
     """Test suite for Dead Letter Queue functionality."""
 
@@ -558,8 +473,6 @@ class TestKafkaConsumerDLQ:
         assert consumer.dlq_topic == "test.dlq"
         assert consumer.max_retries == 3
         assert consumer.enable_dlq is True
-        assert consumer.retry_tracker is not None
-        assert consumer.retry_tracker.max_retries == 3
 
     def test_dlq_disabled(self):
         """Test consumer with DLQ disabled."""
@@ -573,14 +486,14 @@ class TestKafkaConsumerDLQ:
         assert consumer.enable_dlq is False
 
     def test_message_sent_to_dlq_after_max_retries(self, kafka_producer):
-        """Test that message is sent to DLQ after max retries."""
+        """Test that message is sent to DLQ after max retries (transient errors)."""
         dlq_topic = f"test.dlq.{int(time.time())}"
         received_messages = []
 
-        # Handler that always fails
+        # Handler that always fails with a transient error (triggers retry)
         def failing_handler(event_type, data):
             received_messages.append(event_type)
-            raise ValueError("Simulated processing error")
+            raise OSError("Simulated transient error")
 
         # Create main consumer with DLQ enabled
         consumer = KafkaConsumerService(
@@ -589,7 +502,7 @@ class TestKafkaConsumerDLQ:
             group_id=f"test-dlq-maxretries-{int(time.time())}",
             event_handler=failing_handler,
             dlq_topic=dlq_topic,
-            max_retries=2,  # Lower for faster test
+            max_retries=2,  # 2 retries + 1 initial = 3 total attempts
             enable_dlq=True,
         )
 
@@ -607,8 +520,8 @@ class TestKafkaConsumerDLQ:
         kafka_producer.send(KAFKA_TOPIC, test_message)
         kafka_producer.flush()
 
-        # Wait for retries and DLQ send
-        time.sleep(10)
+        # Wait for retries (backoff: 1s + 5s) and DLQ send
+        time.sleep(15)
 
         consumer.stop()
 
@@ -636,7 +549,7 @@ class TestKafkaConsumerDLQ:
         assert "original_message" in dlq_msg
         assert "error" in dlq_msg
         assert "retry_count" in dlq_msg
-        assert dlq_msg["retry_count"] == 2
+        assert dlq_msg["retry_count"] == 3  # max_retries(2) + 1 initial attempt
         assert dlq_msg["source_topic"] == KAFKA_TOPIC
 
     def test_dlq_message_format(self):
@@ -691,6 +604,7 @@ class TestKafkaConsumerDLQ:
         """Test that consumer continues processing after sending message to DLQ."""
         received_messages = []
         fail_integration_id = 999
+        ts = int(time.time())
 
         def selective_failing_handler(event_type, data):
             received_messages.append(data.get("integration_id"))
@@ -700,32 +614,29 @@ class TestKafkaConsumerDLQ:
         consumer = KafkaConsumerService(
             bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
             topic=KAFKA_TOPIC,
-            group_id=f"test-dlq-continue-{int(time.time())}",
+            group_id=f"test-dlq-continue-{ts}",
             event_handler=selective_failing_handler,
             max_retries=2,
             enable_dlq=True,
         )
 
-        consumer.start()
-        time.sleep(3)
-
-        # Send 3 messages: good, bad, good
+        # Publish messages BEFORE starting consumer to ensure they're available
         messages = [
             {
                 "event_type": "integration.created",
-                "event_id": f"good-1-{int(time.time())}",
+                "event_id": f"good-1-{ts}",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": {"integration_id": 1},
             },
             {
                 "event_type": "integration.created",
-                "event_id": f"bad-{int(time.time())}",
+                "event_id": f"bad-{ts}",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": {"integration_id": fail_integration_id},
             },
             {
                 "event_type": "integration.created",
-                "event_id": f"good-2-{int(time.time())}",
+                "event_id": f"good-2-{ts}",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "data": {"integration_id": 2},
             },
@@ -733,14 +644,16 @@ class TestKafkaConsumerDLQ:
 
         for msg in messages:
             kafka_producer.send(KAFKA_TOPIC, msg)
-
         kafka_producer.flush()
+
+        # Start consumer after messages are published
+        consumer.start()
         time.sleep(10)  # Wait for processing
 
         consumer.stop()
 
         # Consumer should have attempted to process all messages
-        # The bad message will be attempted multiple times
+        # The bad message (ValueError) goes to DLQ immediately (permanent error)
         assert 1 in received_messages
         assert 2 in received_messages
         assert fail_integration_id in received_messages

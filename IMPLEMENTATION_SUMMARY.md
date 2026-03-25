@@ -26,7 +26,8 @@ A standalone FastAPI microservice (port 8001) that:
 - Subscribes to Kafka CDC events (`cdc.integration.events`)
 - Runs as an independent service, decoupled from the Control Plane
 - Automatically triggers Airflow DAGs when integrations are created
-- Handles errors gracefully with DLQ support
+- **Redis-based message deduplication** to prevent duplicate DAG runs on restart
+- **Structured error handling**: transient errors retry with backoff, permanent errors go to DLQ immediately
 - Supports custom event handlers
 - Provides health endpoints (`/health`, `/health/ready`, `/health/detailed`)
 - Enables independent scaling and failover
@@ -40,12 +41,53 @@ class KafkaConsumerService:
     def stop() -> None:
         """Gracefully stop consumer"""
 
+    def _process_with_dedup(record, trace_ctx) -> bool:
+        """Dedup check (Redis SET NX) then process. Returns False if duplicate."""
+
     def _process_message(message: dict) -> None:
         """Process CDC events"""
 
     def _trigger_integration_workflow(data: dict) -> None:
         """Trigger Airflow DAG for integration"""
 ```
+
+#### Message Deduplication via Redis
+
+**Problem**: When the Kafka consumer restarts, there is a window between `_process_message()` completing and `consumer.commit()` where a message can be re-delivered. Since DAG run creation is not idempotent, this causes duplicate DAG runs.
+
+**Solution**: Redis-based deduplication using atomic `SET NX EX` (set-if-not-exists with TTL).
+
+**File**: [kafka_consumer/app/services/message_deduplicator.py](kafka_consumer/app/services/message_deduplicator.py)
+
+```python
+class MessageDeduplicator:
+    def build_dedup_key(topic, record, message) -> str:
+        """Debezium: {topic}:{integration_id}:{source_ts_ms}:{op}
+           Legacy:   {topic}:{event_id}
+           Fallback: {topic}:{partition}:{offset}"""
+
+    def is_duplicate(dedup_key) -> bool:
+        """Atomic SET NX EX — returns True if already processed"""
+
+    def remove_dedup_key(dedup_key) -> None:
+        """Called on processing failure so retries can proceed"""
+```
+
+**Design decisions**:
+- **Fail-open**: If Redis is unavailable, processing proceeds without dedup (duplicates are preferable to blocked processing)
+- **TTL**: 24 hours (configurable via `KAFKA_DEDUP_TTL_SECONDS`), covers any restart/rebalance window
+- **Key cleanup on failure**: If `_process_message` raises, the dedup key is removed before the exception propagates, allowing the retry loop to re-process the message
+- **Reuses existing Redis infrastructure**: `shared_utils.redis_client.get_redis_client()` singleton (TLS-aware, Sentinel-aware)
+
+#### Error Classification
+
+The consume loop categorizes exceptions to determine retry vs. DLQ behavior:
+
+| Error Type | Examples | Behavior |
+|---|---|---|
+| **Transient** | `redis.RedisError`, `SQLAlchemyError`, `ConnectionError`, `TimeoutError`, `OSError` | Retry with backoff `[1, 5, 30]s`, then DLQ after `max_retries` |
+| **Permanent** | `ValueError`, `KeyError`, `TypeError` | DLQ immediately, no retry |
+| **Unexpected** | Any other `Exception` | DLQ immediately (catch-all safety net) |
 
 ### 2. Standalone Service Lifecycle ✅
 
@@ -198,37 +240,135 @@ Created three comprehensive documentation files:
 ### Consumer Service Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│  Kafka Consumer Microservice (port 8001)    │
-│                                             │
-│  lifespan(app):                             │
-│    → initialize_kafka_consumer()            │
-│       → KafkaConsumerService.start()        │
-│          → Background thread launched       │
-│          → Subscribes to Kafka topic        │
-│    yield                                    │
-│    → shutdown_kafka_consumer()              │
-│       → Stop polling                        │
-│       → Commit offsets                      │
-│       → Close connections                   │
-│                                             │
-│  while running:                            │
-│    messages = poll(kafka)                   │
-│    for msg in messages:                    │
-│      process_message(msg)                   │
-│        ↓                                    │
-│      if event == "integration.created":     │
-│        trigger_integration_workflow()       │
-│          ↓                                  │
-│        Airflow API call                     │
-│          ↓                                  │
-│        DAG triggered                        │
-│                                             │
-│  Health Endpoints:                          │
-│    GET /health          (liveness)          │
-│    GET /health/ready    (readiness)         │
-│    GET /health/detailed (diagnostics)       │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  Kafka Consumer Microservice (port 8001)                     │
+│                                                              │
+│  lifespan(app):                                              │
+│    → initialize_kafka_consumer()                             │
+│       → KafkaConsumerService.start()                         │
+│          → Background thread launched                        │
+│          → Subscribes to Kafka topic                         │
+│          → enable_auto_commit=False (manual commits only)    │
+│    yield                                                     │
+│    → shutdown_kafka_consumer()                               │
+│                                                              │
+│  Health Endpoints:                                           │
+│    GET /health          (liveness)                            │
+│    GET /health/ready    (readiness)                           │
+│    GET /health/detailed (diagnostics + messages_deduplicated) │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### Message Processing Flow
+
+Each message goes through deduplication, processing, error classification, and offset commit:
+
+```
+                    ┌──────────────┐
+                    │  poll kafka  │
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │  for record  │
+                    │  in records  │
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐     yes
+                    │  tombstone?  ├───────────► skip (continue)
+                    │  (value=None)│
+                    └──────┬───────┘
+                           │ no
+                    ┌──────▼───────────┐
+                    │ extract trace_ctx│
+                    │ (W3C traceparent)│
+                    └──────┬───────────┘
+                           │
+              ┌────────────▼────────────┐
+              │  _process_with_dedup()  │
+              │                         │
+              │  ┌───────────────────┐  │
+              │  │ Redis SET NX EX   │  │     key exists
+              │  │ (atomic dedup     ├──┼──► skip (duplicate)
+              │  │  check+mark)      │  │    messages_deduplicated++
+              │  └────────┬──────────┘  │    commit offset
+              │           │ new message │
+              │  ┌────────▼──────────┐  │
+              │  │ _process_message()│  │
+              │  │                   │  │
+              │  │ Debezium CDC:     │  │
+              │  │   __op=c → create │  │
+              │  │   __op=u → update │  │
+              │  │   __op=d → delete │  │
+              │  │                   │  │
+              │  │ Legacy events:    │  │
+              │  │   event_type key  │  │
+              │  └────────┬──────────┘  │
+              │           │             │
+              │     ┌─────▼──────┐      │
+              │     │  success?  │      │
+              │     └──┬─────┬───┘      │
+              │   yes  │     │ fail     │
+              │        │     │          │
+              │        │  ┌──▼────────┐ │
+              │        │  │ DELETE    │ │
+              │        │  │ dedup key │ │
+              │        │  │ (allow    │ │
+              │        │  │  retry)   │ │
+              │        │  └──┬────────┘ │
+              │        │     │ re-raise │
+              └────────┼─────┼──────────┘
+                       │     │
+                ┌──────▼┐ ┌──▼───────────────────┐
+                │commit │ │  error classification │
+                │offset │ └──┬──────────┬─────────┘
+                └───────┘    │          │
+          ┌──────────────────▼┐  ┌──────▼──────────┐
+          │    TRANSIENT       │  │   PERMANENT      │
+          │ RedisError         │  │ ValueError       │
+          │ SQLAlchemyError    │  │ KeyError         │
+          │ ConnectionError    │  │ TypeError        │
+          │ TimeoutError       │  │ (+ catch-all     │
+          │ OSError            │  │  Exception)      │
+          └────────┬───────────┘  └──────┬───────────┘
+                   │                     │
+          ┌────────▼───────────┐         │
+          │ retry with backoff │         │
+          │ [1s, 5s, 30s]     │         │
+          │                    │         │
+          │ attempt < max?     │         │
+          │  yes → sleep, retry│         │
+          │  no  ──────────────┼─────┐   │
+          └────────────────────┘     │   │
+                                ┌────▼───▼──┐
+                                │  send to  │
+                                │   DLQ     │
+                                │ (DB+Kafka)│
+                                └─────┬─────┘
+                                      │
+                                ┌─────▼─────┐
+                                │  commit   │
+                                │  offset   │
+                                └───────────┘
+```
+
+### Deduplication Key Strategy
+
+The dedup key is built from message content, providing human-readable keys in Redis for debugging:
+
+```
+Debezium CDC events:
+  dedup:kafka:{topic}:{integration_id}:{__source_ts_ms}:{__op}
+  e.g. dedup:kafka:cdc.integration.events:42:1711234567890:c
+
+Legacy events (with event_id):
+  dedup:kafka:{topic}:{event_id}
+  e.g. dedup:kafka:cdc.integration.events:abc-123-def
+
+Fallback (unknown format):
+  dedup:kafka:{topic}:{partition}:{offset}
+  e.g. dedup:kafka:cdc.integration.events:0:42
+
+TTL: 24 hours (configurable) — keys auto-expire after the restart window
 ```
 
 ## Running the System
@@ -290,7 +430,15 @@ kafka-consumer:
   environment:
     DATABASE_URL: mysql+pymysql://control_plane:control_plane@mysql:3306/control_plane
     KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-    AIRFLOW_API_URL: http://airflow-webserver:8080/api/v2
+    AIRFLOW_API_URL: http://airflow-apiserver:8080/api/v2
+    REDIS_HOST: redis
+    REDIS_PORT: '6379'
+    REDIS_PASSWORD: '${REDIS_PASSWORD:-changeme_redis}'
+    KAFKA_DEDUP_ENABLED: 'true'
+    KAFKA_DEDUP_TTL_SECONDS: '86400'
+  depends_on:
+    redis:
+      condition: service_healthy
 ```
 
 **Application Config** ([kafka_consumer/app/core/config.py](kafka_consumer/app/core/config.py)):
@@ -303,9 +451,11 @@ KAFKA_CONSUMER_GROUP: str = "cdc-consumer"
 **Consumer Settings**:
 - Group ID: `cdc-consumer` (configurable via `KAFKA_CONSUMER_GROUP`)
 - Auto Offset Reset: `earliest`
-- Auto Commit: Enabled
+- Auto Commit: Disabled (manual commit after successful processing or DLQ routing)
 - Max Records per Poll: 10
 - Consumer Timeout: 1 second
+- Dedup Enabled: `true` (configurable via `KAFKA_DEDUP_ENABLED`)
+- Dedup TTL: 24 hours (configurable via `KAFKA_DEDUP_TTL_SECONDS`)
 
 ## Testing
 
@@ -345,12 +495,14 @@ pytest control_plane/tests/test_cdc_kafka.py -v -s
 1. **kafka_consumer/app/main.py** — FastAPI app with lifespan context manager
 2. **kafka_consumer/app/core/config.py** — Slim Settings (Kafka, DB, Airflow, logging)
 3. **kafka_consumer/app/core/logging.py** — JSON logging configuration
-4. **kafka_consumer/app/services/kafka_consumer_service.py** — Consumer service with health observability
-5. **kafka_consumer/app/api/health.py** — Liveness, readiness, and detailed health endpoints
-6. **kafka_consumer/tests/test_kafka_consumer_service.py** — 18 test cases
-7. **kafka_consumer/tests/conftest.py** — Test configuration
-8. **docker/Dockerfile.kafka-consumer** — Container image for the consumer service
-9. **requirements-kafka-consumer.txt** — Minimal dependencies
+4. **kafka_consumer/app/services/kafka_consumer_service.py** — Consumer service with per-message retry, dedup, and health observability
+5. **kafka_consumer/app/services/message_deduplicator.py** — Redis-based message deduplication (`SET NX EX`)
+6. **kafka_consumer/app/api/health.py** — Liveness, readiness, and detailed health endpoints (includes `messages_deduplicated` counter)
+7. **kafka_consumer/tests/test_kafka_consumer_service.py** — Unit and integration test cases
+8. **kafka_consumer/tests/test_message_deduplicator.py** — 12 unit tests for deduplication logic
+9. **kafka_consumer/tests/conftest.py** — Test configuration
+10. **docker/Dockerfile.kafka-consumer** — Container image for the consumer service
+11. **requirements-kafka-consumer.txt** — Minimal dependencies (includes `redis` for dedup)
 
 ### Audit Service (New)
 
@@ -948,7 +1100,7 @@ Credential vault helpers:
 - `fetch_credentials(dag_run_id)` — `GET` or raise `AirflowFailException`
 - `delete_credentials(dag_run_id)` — explicit `DELETE`
 
-The `redis` package is optional — import is wrapped in `try/except ImportError` in `__init__.py` so control_plane and kafka_consumer (which don't need Redis) aren't affected.
+The `redis` package is optional for the control_plane — import is wrapped in `try/except ImportError` in `__init__.py`. The kafka_consumer requires Redis for message deduplication (added to `requirements-kafka-consumer.txt`).
 
 ### Component 3: Fernet Key from Docker Secret
 

@@ -186,6 +186,15 @@ Standalone FastAPI microservice (port 8001) that:
 - Runs independently from the control plane for independent scaling and failover
 - Provides health endpoints: `/health`, `/health/ready`, `/health/detailed`
 - Supports Dead Letter Queue (DLQ) for poison pill handling
+- **Redis-based message deduplication**: Prevents duplicate DAG runs on consumer restart (see below)
+
+#### Why Redis for the Kafka Consumer?
+
+When the consumer restarts (crash, deployment, rebalance), there is a window between successfully processing a message and committing its offset back to Kafka. Any message in that window will be re-delivered and re-processed, creating duplicate DAG runs — and DAG creation is not idempotent.
+
+Redis solves this with an atomic `SET NX EX` (set-if-not-exists with TTL) check before processing each message. If the key already exists, the message is a duplicate and is skipped. If processing fails, the key is removed so retries can proceed. Redis failures are fail-open: duplicates are preferable to blocked processing.
+
+The consume loop also classifies errors: transient errors (network, DB, Redis) retry with `[1, 5, 30]s` backoff before DLQ, while permanent errors (bad data) go to DLQ immediately.
 
 ### Audit Service
 

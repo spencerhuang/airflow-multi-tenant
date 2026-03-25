@@ -15,5 +15,8 @@ cryptography==46.0.4
 # Kafka
 kafka-python==2.3.0
 
+# Redis (for message deduplication)
+redis==5.3.1
+
 # HTTP (for Airflow API calls)
 requests==2.32.5

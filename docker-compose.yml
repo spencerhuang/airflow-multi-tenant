@@ -434,12 +434,19 @@ services:
       AIRFLOW_USERNAME: '${AIRFLOW_USERNAME:-airflow}'
       AIRFLOW_PASSWORD: '${AIRFLOW_PASSWORD:-airflow}'
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      REDIS_PASSWORD: '${REDIS_PASSWORD:-changeme_redis}'
+      KAFKA_DEDUP_ENABLED: 'true'
+      KAFKA_DEDUP_TTL_SECONDS: '86400'
     ports:
       - "8001:8001"
     depends_on:
       mysql:
         condition: service_healthy
       kafka:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: always
     healthcheck:

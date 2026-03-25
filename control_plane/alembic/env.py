@@ -33,7 +33,6 @@ from control_plane.app.models import (
     access_point,
     integration,
     integration_run,
-    dead_letter_message,
 )
 
 # this is the Alembic Config object, which provides
@@ -51,6 +50,17 @@ config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 # add your model's MetaData object here
 # for 'autogenerate' support
 target_metadata = Base.metadata
+
+# Tables managed by other services (e.g. kafka_consumer) that share
+# this database.  Autogenerate should ignore them.
+_EXTERNAL_TABLES = {"dead_letter_messages"}
+
+
+def include_name(name, type_, parent_names):
+    if type_ == "table" and name in _EXTERNAL_TABLES:
+        return False
+    return True
+
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -76,6 +86,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_name=include_name,
     )
 
     with context.begin_transaction():
@@ -83,7 +94,7 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(connection=connection, target_metadata=target_metadata, include_name=include_name)
 
     with context.begin_transaction():
         context.run_migrations()

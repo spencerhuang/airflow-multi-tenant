@@ -4,13 +4,16 @@ import json
 import logging
 import threading
 import time
-from typing import Optional, Callable, Dict
+from typing import Optional, Callable
 from datetime import datetime, timezone
 
+import redis as redis_lib
 from kafka import KafkaConsumer, KafkaProducer
 from kafka.errors import KafkaError
+from sqlalchemy.exc import SQLAlchemyError
 
 from kafka_consumer.app.core.config import settings
+from kafka_consumer.app.services.message_deduplicator import MessageDeduplicator
 from shared_utils.audit_producer import get_audit_producer
 
 logger = logging.getLogger(__name__)
@@ -36,40 +39,8 @@ def _get_audit_producer():
     return _audit_producer
 
 
-class MessageRetryTracker:
-    """Track message retry attempts in memory."""
-
-    def __init__(self, max_retries: int = 3):
-        self.max_retries = max_retries
-        self.retry_counts: Dict[str, int] = {}
-        self.lock = threading.Lock()
-
-    def get_retry_count(self, message_key: str) -> int:
-        """Get current retry count for a message."""
-        with self.lock:
-            return self.retry_counts.get(message_key, 0)
-
-    def increment_retry(self, message_key: str) -> int:
-        """Increment retry count and return new count."""
-        with self.lock:
-            count = self.retry_counts.get(message_key, 0) + 1
-            self.retry_counts[message_key] = count
-            return count
-
-    def reset_retry(self, message_key: str):
-        """Reset retry count for a message."""
-        with self.lock:
-            if message_key in self.retry_counts:
-                del self.retry_counts[message_key]
-
-    def should_send_to_dlq(self, message_key: str) -> bool:
-        """Check if message should be sent to DLQ."""
-        return self.get_retry_count(message_key) >= self.max_retries
-
-    def cleanup_old_entries(self, max_age_seconds: int = 3600):
-        """Remove entries older than max_age_seconds (not implemented - in-memory only)."""
-        # In production, use Redis or similar for persistent retry tracking
-        pass
+# Retry backoff schedule (seconds) for transient errors
+RETRY_BACKOFF = [1, 5, 30]
 
 
 class KafkaConsumerService:
@@ -116,15 +87,22 @@ class KafkaConsumerService:
         self.enable_dlq = enable_dlq
         self.consumer: Optional[KafkaConsumer] = None
         self.dlq_producer: Optional[KafkaProducer] = None
-        self.retry_tracker = MessageRetryTracker(max_retries=max_retries)
         self.running = False
         self.thread: Optional[threading.Thread] = None
+
+        # Deduplication
+        self.deduplicator: Optional[MessageDeduplicator] = None
+        if settings.KAFKA_DEDUP_ENABLED:
+            self.deduplicator = MessageDeduplicator(
+                ttl_seconds=settings.KAFKA_DEDUP_TTL_SECONDS
+            )
 
         # Health observability
         self.started_at: Optional[datetime] = None
         self.last_message_time: Optional[datetime] = None
         self.messages_processed: int = 0
         self.messages_failed: int = 0
+        self.messages_deduplicated: int = 0
         self.last_error: Optional[str] = None
         self.is_connected: bool = False
 
@@ -187,7 +165,6 @@ class KafkaConsumerService:
         producer = self._get_dlq_producer()
         if not self.enable_dlq or not producer:
             logger.debug("Kafka DLQ producer not enabled or not initialized, skipping Kafka DLQ send")
-            self.retry_tracker.reset_retry(message_key)
             return
 
         try:
@@ -242,8 +219,7 @@ class KafkaConsumerService:
         except Exception:
             logger.debug("Failed to emit audit event for DLQ", exc_info=True)
 
-        # Reset retry counter
-        self.retry_tracker.reset_retry(message_key)
+        # Reset retry counter (no-op now; retry is handled inline in consume loop)
 
     @staticmethod
     def _extract_trace_context(record):
@@ -317,7 +293,7 @@ class KafkaConsumerService:
                         bootstrap_servers=[self.bootstrap_servers],
                         group_id=self.group_id,
                         auto_offset_reset="earliest",
-                        enable_auto_commit=not self.enable_dlq,
+                        enable_auto_commit=False,
                         value_deserializer=lambda m: json.loads(m.decode("utf-8")) if m is not None else None,
                         consumer_timeout_ms=1000,
                     )
@@ -338,94 +314,79 @@ class KafkaConsumerService:
             # Consume messages
             while self.running:
                 try:
-                    # Poll for messages with timeout
                     messages = self.consumer.poll(timeout_ms=1000, max_records=10)
 
                     for topic_partition, records in messages.items():
                         for record in records:
-                            try:
-                                # Skip None values (tombstone messages from Debezium deletes)
-                                if record.value is None:
-                                    logger.debug("Skipping tombstone message (None value)")
-                                    continue
+                            if record.value is None:
+                                logger.debug("Skipping tombstone message (None value)")
+                                continue
 
-                                # Generate message key for retry tracking
-                                message = record.value
-                                trace_ctx = self._extract_trace_context(record)
-                                trace_id = trace_ctx.trace_id
-                                # Try to get integration_id from top level (Debezium) or from data field (legacy)
-                                integration_id = message.get("integration_id")
-                                if not integration_id and isinstance(message.get("data"), dict):
-                                    integration_id = message.get("data", {}).get("integration_id")
-                                message_key = str(integration_id if integration_id else f"offset_{record.offset}")
+                            # Extract trace context early so it's available in all error handlers
+                            message = record.value
+                            trace_ctx = self._extract_trace_context(record)
+                            trace_id = trace_ctx.trace_id
 
-                                # Check if message should go to DLQ
-                                if self.enable_dlq and self.retry_tracker.should_send_to_dlq(message_key):
-                                    logger.warning(
-                                        f"Message exceeded max retries, sending to DLQ: {message_key}",
-                                        extra={"trace_id": trace_id},
-                                    )
-                                    self._send_to_dlq(
-                                        message,
-                                        Exception("Max retries exceeded"),
-                                        self.retry_tracker.get_retry_count(message_key)
-                                    )
-                                    # Commit offset after sending to DLQ
-                                    if self.enable_dlq:
-                                        self.consumer.commit()
-                                    continue
+                            success = False
+                            for attempt in range(self.max_retries + 1):
+                                try:
+                                    if self._process_with_dedup(record, trace_ctx):
+                                        success = True  # processed successfully
+                                    else:
+                                        success = True  # duplicate, considered handled
+                                    break
 
-                                # Process message
-                                self._process_message(message, trace_id=trace_id, traceparent=trace_ctx.traceparent)
+                                except (redis_lib.RedisError, SQLAlchemyError, KafkaError,
+                                        ConnectionError, TimeoutError, OSError) as e:
+                                    # Transient error — retry with backoff
+                                    self.messages_failed += 1
+                                    self.last_error = str(e)
+                                    if attempt < self.max_retries:
+                                        wait = RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)]
+                                        logger.warning(
+                                            f"Transient error (attempt {attempt + 1}/{self.max_retries}): {e}. "
+                                            f"Retrying in {wait}s...",
+                                            exc_info=True,
+                                            extra={"kafka_message": message, "trace_id": trace_id},
+                                        )
+                                        time.sleep(wait)
+                                    else:
+                                        logger.error(
+                                            f"Max retries exceeded for transient error: {e}",
+                                            exc_info=True,
+                                            extra={"kafka_message": message, "trace_id": trace_id},
+                                        )
+                                        self._send_to_dlq(message, e, attempt + 1)
+                                        success = True
 
-                                # Track success
-                                self.messages_processed += 1
-                                self.last_message_time = datetime.now(timezone.utc)
-
-                                # Reset retry counter on success
-                                if self.enable_dlq:
-                                    self.retry_tracker.reset_retry(message_key)
-                                    # Commit offset after successful processing
-                                    self.consumer.commit()
-
-                            except Exception as e:
-                                # Track failure
-                                self.messages_failed += 1
-                                self.last_error = str(e)
-
-                                # Handle processing error
-                                message = record.value if record.value else {}
-                                # trace_id may not be set if extraction itself failed
-                                _trace_id = locals().get("trace_id", "")
-                                # Try to get integration_id from top level (Debezium) or from data field (legacy)
-                                integration_id = message.get("integration_id")
-                                if not integration_id and isinstance(message.get("data"), dict):
-                                    integration_id = message.get("data", {}).get("integration_id")
-                                message_key = str(integration_id if integration_id else f"offset_{record.offset}")
-
-                                # Increment retry count
-                                if self.enable_dlq:
-                                    retry_count = self.retry_tracker.increment_retry(message_key)
-
+                                except (ValueError, KeyError, TypeError) as e:
+                                    # Permanent error — DLQ immediately, no retry
+                                    self.messages_failed += 1
+                                    self.last_error = str(e)
                                     logger.error(
-                                        f"Error processing message (attempt {retry_count}/{self.max_retries}): {e}",
+                                        f"Permanent error, sending to DLQ: {e}",
                                         exc_info=True,
-                                        extra={"kafka_message": message, "message_key": message_key, "trace_id": _trace_id},
+                                        extra={"kafka_message": message, "trace_id": trace_id},
                                     )
+                                    self._send_to_dlq(message, e, 0)
+                                    success = True
+                                    break
 
-                                    # Check if we should send to DLQ
-                                    if retry_count >= self.max_retries:
-                                        self._send_to_dlq(message, e, retry_count)
-                                        # Reset retry tracker and commit after DLQ
-                                        self.retry_tracker.reset_retry(message_key)
-                                        self.consumer.commit()
-                                    # else: Don't commit - let message be redelivered for retry
-                                else:
+                                except Exception as e:
+                                    # Unexpected error — treat as permanent, DLQ immediately
+                                    self.messages_failed += 1
+                                    self.last_error = str(e)
                                     logger.error(
-                                        f"Error processing message: {e}",
+                                        f"Unexpected error, sending to DLQ: {e}",
                                         exc_info=True,
-                                        extra={"kafka_message": message, "trace_id": _trace_id},
+                                        extra={"kafka_message": message, "trace_id": trace_id},
                                     )
+                                    self._send_to_dlq(message, e, 0)
+                                    success = True
+                                    break
+
+                            if success:
+                                self.consumer.commit()
 
                 except Exception as e:
                     if self.running:
@@ -444,6 +405,42 @@ class KafkaConsumerService:
                     self.consumer.close()
                 except Exception as e:
                     logger.error(f"Error closing consumer: {e}")
+
+    def _process_with_dedup(self, record, trace_ctx) -> bool:
+        """Process message with deduplication.
+
+        Returns True if message was processed, False if it was a duplicate.
+        Raises on processing failure (caller handles retry/DLQ).
+        """
+        message = record.value
+
+        # Dedup check (atomic SET NX)
+        dedup_key = None
+        if self.deduplicator:
+            dedup_key = self.deduplicator.build_dedup_key(self.topic, record, message)
+            if self.deduplicator.is_duplicate(dedup_key):
+                logger.info(
+                    "Skipping duplicate message (dedup_key=%s)",
+                    dedup_key,
+                    extra={"trace_id": trace_ctx.trace_id},
+                )
+                self.messages_deduplicated += 1
+                return False
+
+        try:
+            self._process_message(
+                message,
+                trace_id=trace_ctx.trace_id,
+                traceparent=trace_ctx.traceparent,
+            )
+            self.messages_processed += 1
+            self.last_message_time = datetime.now(timezone.utc)
+            return True
+        except Exception:
+            # Remove dedup key so retries can re-process this message
+            if self.deduplicator and dedup_key:
+                self.deduplicator.remove_dedup_key(dedup_key)
+            raise
 
     def _process_message(self, message: dict, trace_id: str = "", traceparent: str = "") -> None:
         """
