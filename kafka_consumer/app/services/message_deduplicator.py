@@ -1,22 +1,36 @@
 """Redis-based message deduplication for Kafka consumer.
 
-Uses atomic SET NX EX to check-and-mark messages as processed in a single
-Redis round-trip. Fail-open: if Redis is unavailable, processing proceeds
-without dedup (duplicates are preferable to blocked processing).
+Uses a two-phase status protocol to handle the "restart gap" — the window
+between processing a message and committing its Kafka offset.
+
+Phase 1 (claim):   SET NX key="P" (processing) with short TTL (claim lease)
+Phase 2 (confirm): SET key="C" (completed) with long TTL (24h)
+
+On redelivery after restart:
+  - Key missing or expired  → process normally (new or stale lease)
+  - Value = "P"             → previous attempt crashed mid-process, re-process
+  - Value = "C"             → true duplicate, skip
+
+Fail-open: if Redis is unavailable, processing proceeds without dedup
+(duplicates are preferable to blocked processing).
 """
 
 import logging
 
 logger = logging.getLogger(__name__)
 
+STATUS_PROCESSING = "P"
+STATUS_COMPLETED = "C"
+
 
 class MessageDeduplicator:
-    """Redis-based message deduplication using SET NX with TTL."""
+    """Redis-based message deduplication with two-phase status tracking."""
 
     KEY_PREFIX = "dedup:kafka:"
 
-    def __init__(self, ttl_seconds: int = 86400):
-        self.ttl_seconds = ttl_seconds
+    def __init__(self, ttl_seconds: int = 86400, claim_ttl_seconds: int = 420):
+        self.ttl_seconds = ttl_seconds  # long TTL for completed keys
+        self.claim_ttl_seconds = claim_ttl_seconds  # short lease for processing
         self._redis_client = None
 
     def _get_client(self):
@@ -53,24 +67,58 @@ class MessageDeduplicator:
         # Fallback: partition:offset
         return f"{self.KEY_PREFIX}{topic}:{record.partition}:{record.offset}"
 
-    def is_duplicate(self, dedup_key: str) -> bool:
-        """Check if message was already processed via atomic SET NX EX.
+    def claim(self, dedup_key: str) -> str:
+        """Claim a message for processing (phase 1).
 
-        Returns True if duplicate, False if new. Returns False on Redis
-        failure (fail-open).
+        Returns:
+            "new"       — key did not exist, claimed with status "P"
+            "processing"— key exists with status "P" (previous crash), safe to re-process
+            "completed" — key exists with status "C", true duplicate, skip
+            "unknown"   — Redis unavailable, proceed without dedup (fail-open)
         """
         client = self._get_client()
         if client is None:
-            return False
+            return "unknown"
         try:
-            result = client.set(dedup_key, "1", nx=True, ex=self.ttl_seconds)
-            return result is None  # None means key already existed
+            # Try atomic SET NX with short TTL
+            result = client.set(
+                dedup_key, STATUS_PROCESSING, nx=True, ex=self.claim_ttl_seconds,
+            )
+            if result:
+                return "new"
+
+            # Key exists — check what status it holds
+            value = client.get(dedup_key)
+            if value is None:
+                # Expired between SET NX and GET — race condition, treat as new
+                client.set(dedup_key, STATUS_PROCESSING, ex=self.claim_ttl_seconds)
+                return "new"
+
+            decoded = value.decode() if isinstance(value, bytes) else value
+            if decoded == STATUS_COMPLETED:
+                return "completed"
+
+            # Status is "P" — previous attempt crashed, allow re-processing
+            # Reset the lease TTL so this attempt has time to finish
+            client.set(dedup_key, STATUS_PROCESSING, ex=self.claim_ttl_seconds)
+            return "processing"
+
         except Exception:
-            logger.warning("Redis dedup check failed, proceeding without dedup", exc_info=True)
-            return False
+            logger.warning("Redis dedup claim failed, proceeding without dedup", exc_info=True)
+            return "unknown"
+
+    def confirm(self, dedup_key: str) -> None:
+        """Mark message as completed (phase 2). Overwrites "P" with "C" and long TTL."""
+        client = self._get_client()
+        if client is None:
+            return
+        try:
+            client.set(dedup_key, STATUS_COMPLETED, ex=self.ttl_seconds)
+        except Exception:
+            logger.warning("Redis dedup confirm failed for %s", dedup_key, exc_info=True)
 
     def remove_dedup_key(self, dedup_key: str) -> None:
-        """Remove dedup key on processing failure to allow retry."""
+        """Remove dedup key on permanent failure (DLQ) to keep Redis clean."""
         client = self._get_client()
         if client is None:
             return

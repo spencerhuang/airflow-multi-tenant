@@ -192,7 +192,19 @@ Standalone FastAPI microservice (port 8001) that:
 
 When the consumer restarts (crash, deployment, rebalance), there is a window between successfully processing a message and committing its offset back to Kafka. Any message in that window will be re-delivered and re-processed, creating duplicate DAG runs — and DAG creation is not idempotent.
 
-Redis solves this with an atomic `SET NX EX` (set-if-not-exists with TTL) check before processing each message. If the key already exists, the message is a duplicate and is skipped. If processing fails, the key is removed so retries can proceed. Redis failures are fail-open: duplicates are preferable to blocked processing.
+Redis solves this with a **two-phase deduplication protocol**:
+
+1. **Claim** (`SET NX key="P"`, 7-min TTL): Mark the message as "processing" with a short lease
+2. **Process**: Execute business logic (trigger DAG, record run)
+3. **Confirm** (`SET key="C"`, 24h TTL): Overwrite with "completed" status
+4. **Commit**: Commit the Kafka offset
+
+On redelivery after restart, the consumer checks the key's value:
+- **Missing or expired** → process normally (new message or stale lease)
+- **Value = "P"** → previous attempt crashed mid-process, safe to re-process
+- **Value = "C"** → true duplicate, skip
+
+This avoids the naive `SET NX` pitfall where a crash between marking and processing would block the message until TTL expiry. Redis failures are fail-open: duplicates are preferable to blocked processing.
 
 The consume loop also classifies errors: transient errors (network, DB, Redis) retry with `[1, 5, 30]s` backoff before DLQ, while permanent errors (bad data) go to DLQ immediately.
 

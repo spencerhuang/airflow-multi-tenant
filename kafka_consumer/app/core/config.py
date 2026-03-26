@@ -40,7 +40,8 @@ class Settings(BaseSettings):
 
     # Message deduplication
     KAFKA_DEDUP_ENABLED: bool = True
-    KAFKA_DEDUP_TTL_SECONDS: int = 86400  # 24 hours
+    KAFKA_DEDUP_TTL_SECONDS: int = 86400  # 24 hours — long TTL for completed keys
+    KAFKA_DEDUP_CLAIM_TTL_SECONDS: int = 420  # 7 min — short lease for processing phase
 
     # Logging
     LOG_LEVEL: str = "INFO"

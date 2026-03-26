@@ -287,12 +287,27 @@ Each message goes through deduplication, processing, error classification, and o
               │  _process_with_dedup()  │
               │                         │
               │  ┌───────────────────┐  │
-              │  │ Redis SET NX EX   │  │     key exists
-              │  │ (atomic dedup     ├──┼──► skip (duplicate)
-              │  │  check+mark)      │  │    messages_deduplicated++
-              │  └────────┬──────────┘  │    commit offset
-              │           │ new message │
-              │  ┌────────▼──────────┐  │
+              │  │  Phase 1: CLAIM   │  │
+              │  │  SET NX key="P"   │  │
+              │  │  TTL=7min (lease) │  │
+              │  └────────┬─────────┘  │
+              │           │             │
+              │     ┌─────▼──────────┐  │
+              │     │ claim result?  │  │
+              │     └──┬─────┬────┬──┘  │
+              │  "new" │     │    │     │
+              │  or    │ "completed"    │
+              │  "processing"│    │     │
+              │  or    │     │ "unknown"│
+              │ "unknown"    │    │     │
+              │        │     │    │     │
+              │        │     ▼    │     │
+              │        │   skip   │     │
+              │        │  (dedup) │     │
+              │        │  commit  │     │
+              │        │  offset  │     │
+              │        │         │      │
+              │  ┌─────▼─────────▼──┐   │
               │  │ _process_message()│  │
               │  │                   │  │
               │  │ Debezium CDC:     │  │
@@ -309,12 +324,15 @@ Each message goes through deduplication, processing, error classification, and o
               │     └──┬─────┬───┘      │
               │   yes  │     │ fail     │
               │        │     │          │
-              │        │  ┌──▼────────┐ │
-              │        │  │ DELETE    │ │
-              │        │  │ dedup key │ │
-              │        │  │ (allow    │ │
-              │        │  │  retry)   │ │
-              │        │  └──┬────────┘ │
+              │  ┌─────▼──────────┐     │
+              │  │ Phase 2: CONFIRM│    │
+              │  │ SET key="C"    │     │
+              │  │ TTL=24h        │     │
+              │  └─────┬──────────┘     │
+              │        │     │          │
+              │        │     │ leave "P"│
+              │        │     │ (expires │
+              │        │     │  in 7min)│
               │        │     │ re-raise │
               └────────┼─────┼──────────┘
                        │     │
@@ -368,7 +386,14 @@ Fallback (unknown format):
   dedup:kafka:{topic}:{partition}:{offset}
   e.g. dedup:kafka:cdc.integration.events:0:42
 
-TTL: 24 hours (configurable) — keys auto-expire after the restart window
+Two-phase TTLs:
+  Phase 1 "P" (processing): 7 min claim lease (KAFKA_DEDUP_CLAIM_TTL_SECONDS)
+  Phase 2 "C" (completed):  24 hours          (KAFKA_DEDUP_TTL_SECONDS)
+
+Restart gap handling:
+  Key missing  → new message, process normally
+  Value = "P"  → previous attempt crashed, re-process safely
+  Value = "C"  → true duplicate, skip
 ```
 
 ## Running the System

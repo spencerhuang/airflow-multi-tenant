@@ -94,7 +94,8 @@ class KafkaConsumerService:
         self.deduplicator: Optional[MessageDeduplicator] = None
         if settings.KAFKA_DEDUP_ENABLED:
             self.deduplicator = MessageDeduplicator(
-                ttl_seconds=settings.KAFKA_DEDUP_TTL_SECONDS
+                ttl_seconds=settings.KAFKA_DEDUP_TTL_SECONDS,
+                claim_ttl_seconds=settings.KAFKA_DEDUP_CLAIM_TTL_SECONDS,
             )
 
         # Health observability
@@ -407,25 +408,37 @@ class KafkaConsumerService:
                     logger.error(f"Error closing consumer: {e}")
 
     def _process_with_dedup(self, record, trace_ctx) -> bool:
-        """Process message with deduplication.
+        """Process message with two-phase deduplication.
+
+        Phase 1 (claim): SET NX key="P" with short TTL (lease)
+        Phase 2 (confirm): SET key="C" with long TTL after success
 
         Returns True if message was processed, False if it was a duplicate.
         Raises on processing failure (caller handles retry/DLQ).
         """
         message = record.value
 
-        # Dedup check (atomic SET NX)
+        # Phase 1: claim
         dedup_key = None
         if self.deduplicator:
             dedup_key = self.deduplicator.build_dedup_key(self.topic, record, message)
-            if self.deduplicator.is_duplicate(dedup_key):
+            status = self.deduplicator.claim(dedup_key)
+
+            if status == "completed":
                 logger.info(
-                    "Skipping duplicate message (dedup_key=%s)",
+                    "Skipping duplicate message (dedup_key=%s, status=C)",
                     dedup_key,
                     extra={"trace_id": trace_ctx.trace_id},
                 )
                 self.messages_deduplicated += 1
                 return False
+
+            if status == "processing":
+                logger.info(
+                    "Re-processing message from crashed attempt (dedup_key=%s, status=P)",
+                    dedup_key,
+                    extra={"trace_id": trace_ctx.trace_id},
+                )
 
         try:
             self._process_message(
@@ -433,13 +446,15 @@ class KafkaConsumerService:
                 trace_id=trace_ctx.trace_id,
                 traceparent=trace_ctx.traceparent,
             )
+            # Phase 2: confirm
+            if self.deduplicator and dedup_key:
+                self.deduplicator.confirm(dedup_key)
             self.messages_processed += 1
             self.last_message_time = datetime.now(timezone.utc)
             return True
         except Exception:
-            # Remove dedup key so retries can re-process this message
-            if self.deduplicator and dedup_key:
-                self.deduplicator.remove_dedup_key(dedup_key)
+            # Don't remove key — leave "P" so it auto-expires via claim TTL.
+            # Kafka will redeliver and claim() will see "P" → allow re-process.
             raise
 
     def _process_message(self, message: dict, trace_id: str = "", traceparent: str = "") -> None:

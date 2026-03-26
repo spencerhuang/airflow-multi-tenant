@@ -1,15 +1,19 @@
-"""Tests for Redis-based message deduplication."""
+"""Tests for Redis-based two-phase message deduplication."""
 
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 
-from kafka_consumer.app.services.message_deduplicator import MessageDeduplicator
+from kafka_consumer.app.services.message_deduplicator import (
+    MessageDeduplicator,
+    STATUS_PROCESSING,
+    STATUS_COMPLETED,
+)
 
 
 @pytest.fixture
 def deduplicator():
     """Create a MessageDeduplicator with mocked Redis."""
-    dedup = MessageDeduplicator(ttl_seconds=86400)
+    dedup = MessageDeduplicator(ttl_seconds=86400, claim_ttl_seconds=420)
     dedup._redis_client = MagicMock()
     return dedup
 
@@ -64,43 +68,93 @@ class TestBuildDedupKey:
         assert key == "dedup:kafka:cdc.integration.events:0:42"
 
 
-class TestIsDuplicate:
-    """Test duplicate detection via Redis SET NX."""
+class TestClaim:
+    """Test two-phase claim (phase 1) for different scenarios."""
 
     def test_new_message(self, deduplicator):
-        """SET NX returns True for new keys — message is NOT a duplicate."""
+        """SET NX succeeds — new message, returns 'new'."""
         deduplicator._redis_client.set.return_value = True
-        assert deduplicator.is_duplicate("dedup:kafka:test:1:123:c") is False
+        result = deduplicator.claim("dedup:kafka:test:1:123:c")
+        assert result == "new"
         deduplicator._redis_client.set.assert_called_once_with(
-            "dedup:kafka:test:1:123:c", "1", nx=True, ex=86400
+            "dedup:kafka:test:1:123:c", STATUS_PROCESSING, nx=True, ex=420,
         )
 
-    def test_existing_message(self, deduplicator):
-        """SET NX returns None for existing keys — message IS a duplicate."""
-        deduplicator._redis_client.set.return_value = None
-        assert deduplicator.is_duplicate("dedup:kafka:test:1:123:c") is True
+    def test_completed_message(self, deduplicator):
+        """Key exists with value 'C' — true duplicate, returns 'completed'."""
+        deduplicator._redis_client.set.return_value = None  # NX failed
+        deduplicator._redis_client.get.return_value = b"C"
+        result = deduplicator.claim("dedup:kafka:test:1:123:c")
+        assert result == "completed"
 
-    def test_redis_failure_returns_false(self, deduplicator):
-        """Redis failure returns False (fail-open — proceed with processing)."""
+    def test_processing_message_from_crashed_attempt(self, deduplicator):
+        """Key exists with value 'P' — previous crash, returns 'processing'."""
+        deduplicator._redis_client.set.return_value = None  # NX failed
+        deduplicator._redis_client.get.return_value = b"P"
+        result = deduplicator.claim("dedup:kafka:test:1:123:c")
+        assert result == "processing"
+        # Should reset the lease TTL
+        assert deduplicator._redis_client.set.call_count == 2
+        deduplicator._redis_client.set.assert_called_with(
+            "dedup:kafka:test:1:123:c", STATUS_PROCESSING, ex=420,
+        )
+
+    def test_key_expired_between_nx_and_get(self, deduplicator):
+        """Race condition: key expires between SET NX and GET — treat as new."""
+        deduplicator._redis_client.set.return_value = None  # NX failed
+        deduplicator._redis_client.get.return_value = None  # expired
+        result = deduplicator.claim("dedup:kafka:test:1:123:c")
+        assert result == "new"
+
+    def test_redis_failure_returns_unknown(self, deduplicator):
+        """Redis failure returns 'unknown' (fail-open)."""
         import redis as redis_lib
         deduplicator._redis_client.set.side_effect = redis_lib.RedisError("connection lost")
-        assert deduplicator.is_duplicate("dedup:kafka:test:1:123:c") is False
+        result = deduplicator.claim("dedup:kafka:test:1:123:c")
+        assert result == "unknown"
 
-    def test_redis_unavailable_returns_false(self):
-        """When Redis client can't be initialized, returns False (fail-open)."""
+    def test_redis_unavailable_returns_unknown(self):
+        """When Redis client can't be initialized, returns 'unknown' (fail-open)."""
         dedup = MessageDeduplicator()
         with patch(
             "kafka_consumer.app.services.message_deduplicator.get_redis_client",
             side_effect=Exception("Redis down"),
             create=True,
         ):
-            # Force re-init by clearing cached client
             dedup._redis_client = None
-            assert dedup.is_duplicate("some-key") is False
+            assert dedup.claim("some-key") == "unknown"
+
+
+class TestConfirm:
+    """Test phase 2 — marking message as completed."""
+
+    def test_confirms_with_long_ttl(self, deduplicator):
+        """Confirm overwrites key with 'C' and long TTL."""
+        deduplicator.confirm("dedup:kafka:test:1:123:c")
+        deduplicator._redis_client.set.assert_called_once_with(
+            "dedup:kafka:test:1:123:c", STATUS_COMPLETED, ex=86400,
+        )
+
+    def test_redis_failure_does_not_raise(self, deduplicator):
+        """Redis failure during confirm is swallowed."""
+        import redis as redis_lib
+        deduplicator._redis_client.set.side_effect = redis_lib.RedisError("connection lost")
+        deduplicator.confirm("dedup:kafka:test:1:123:c")  # Should not raise
+
+    def test_no_client_does_not_raise(self):
+        """When Redis client is None, confirm is a no-op."""
+        dedup = MessageDeduplicator()
+        dedup._redis_client = None
+        with patch(
+            "kafka_consumer.app.services.message_deduplicator.get_redis_client",
+            side_effect=Exception("Redis down"),
+            create=True,
+        ):
+            dedup.confirm("some-key")  # Should not raise
 
 
 class TestRemoveDedupKey:
-    """Test dedup key removal on processing failure."""
+    """Test dedup key removal (DLQ cleanup)."""
 
     def test_removes_key(self, deduplicator):
         """Successful key removal calls DELETE."""
@@ -108,10 +162,9 @@ class TestRemoveDedupKey:
         deduplicator._redis_client.delete.assert_called_once_with("dedup:kafka:test:1:123:c")
 
     def test_redis_failure_does_not_raise(self, deduplicator):
-        """Redis failure during removal is swallowed (logged, not raised)."""
+        """Redis failure during removal is swallowed."""
         import redis as redis_lib
         deduplicator._redis_client.delete.side_effect = redis_lib.RedisError("connection lost")
-        # Should not raise
         deduplicator.remove_dedup_key("dedup:kafka:test:1:123:c")
 
     def test_no_client_does_not_raise(self):
